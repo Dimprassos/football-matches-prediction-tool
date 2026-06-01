@@ -5,11 +5,11 @@
     "xgb": 0.0,
     "mlp": 0.0
   },
-  "late_val_logloss": 0.9609650874977137,
+  "late_val_logloss": 0.9602779332942968,
   "mlp_allowed": false,
   "mlp_gate": {
-    "late_mlp_logloss": 0.9741203017856326,
-    "late_market_logloss": 0.9609650874977137,
+    "late_mlp_logloss": 0.9757366135841421,
+    "late_market_logloss": 0.9602779332942968,
     "margin_required": 0.002
   }
 }

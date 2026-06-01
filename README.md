@@ -11,29 +11,36 @@ Developed as part of a diploma thesis in Computer and Informatics Engineering.
 - Optional pre-match context from lineups, injuries, suspensions, manager changes, and weather
 - Dynamic Elo ratings with home advantage, goal-margin updates, and promoted-team initialization
 - Recency-weighted Poisson team strengths with Dixon-Coles low-score correction
-- Meta-features built from model probabilities, market probabilities, Elo differences, expected goals, rolling match stats, and optional context
+- Meta-features built from model probabilities, market probabilities, Elo differences, expected goals, rolling attacking/defensive match stats, and optional context
 - XGBoost meta-model plus MLP baseline
 - Probability calibration with temperature scaling
 - Ensemble blending across base model, market, XGBoost, and MLP outputs
 - Fixed temporal train / validation / test split with per-league chronological processing
+- Explicit opening/closing odds snapshots for market features and simulated bet prices
 - Leakage-safe single-season backtests with season-specific cache manifests
 - CLI diagnostics for tuned league parameters, blend weights, and tuned-vs-baseline parameter impact
-- Evaluation with log loss, Brier score, ECE, accuracy, betting simulation, and audit reports
+- Evaluation with log loss, Brier score, ECE, accuracy, macro F1, per-class precision/recall, betting simulation, and audit reports
 - Validation-locked bet selection with ROI by edge, confidence, odds bucket, league, and pick type
 - Alternative-market audits for double chance, draw-no-bet, over/under 2.5, and Asian handicap coverage
 - Upcoming matchday predictions from dedicated fixture files
 
 ## Repository Structure
 
+- `app.py`: Streamlit interactive tool (match prediction, model evaluation, dataset extension, and retraining)
+- `requirements.txt`: pinned runtime dependencies for the interactive tool
 - `main.py`: training and evaluation pipeline entry point
 - `backtest_season.py`: leakage-safe single-season betting backtest entry point
 - `predict_match.py`: interactive custom match predictor entry point
+- `retrain_runner.py`: retrain into a separate experiment, leaving canonical artifacts untouched
+- `analyze_ci.py`: bootstrap confidence intervals (log loss vs market, ROI, CLV) for season backtests
 - `update_team_news.py`: optional API-Football team-news updater
 - `src/update_understat.py`: optional Understat xG refresh command
 - `src/update_weather_context.py`: optional Open-Meteo weather context updater
 - `src/trainer.py`: end-to-end pipeline orchestration
 - `src/bet_selection.py`: validation-locked bet filters and alternative-market audits
 - `src/final_report.py`: console summary for the saved final reports
+- `src/thesis_report.py`: thesis-ready markdown/CSV results summary from saved artifacts
+- `src/literature_audit.py`: fast literature-grounded benchmark of public-feature models vs the market
 - `src/predictor.py`: runtime predictor utilities
 - `src/services/upcoming.py`: upcoming matchday predictions
 
@@ -75,6 +82,23 @@ source venv/bin/activate
 
 ## Usage
 
+### Interactive Prediction Tool (Streamlit)
+
+The main deliverable is an interactive tool. Install the runtime dependencies and launch it:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+The tool has three pages (the UI is in Greek):
+
+- **Πρόβλεψη Αγώνα** (match prediction): pick a league, the two teams, optional 1X2 odds, and which model to trust; it returns 1/X/2 probabilities, a confidence level, Elo, expected goals, and the most likely scorelines.
+- **Αξιολόγηση Μοντέλων** (model evaluation): stored probability-quality metrics (log loss, Brier, ECE, accuracy, macro F1) per model, to help decide which model to use.
+- **Εκπαίδευση / Δεδομένα** (training & data): append your own matches to a local user CSV and retrain into a separate `user_retrain` experiment, leaving the canonical thesis numbers untouched.
+
+The tool loads the cached artifacts of the `final_opening_market_pre_match` experiment (opening odds, leakage-safe temporal splits).
+
 ### 1. Update Data
 
 Download the latest historical results and future fixtures:
@@ -99,7 +123,7 @@ Runs the final configured pipeline:
 python main.py
 ```
 
-`main.py` uses `FINAL_CONFIG` from `src/config.py`. It loads compatible cached tuning artifacts when possible, but the current final config still refits the final XGBoost/MLP models and retunes the blend unless you change those config flags.
+`main.py` uses `FINAL_CONFIG` from `src/config.py`. The final config is an opening-odds pre-match setup: market probabilities and simulated bet prices come from opening odds, and closing-movement features are disabled. It loads compatible cached tuning artifacts when possible, but the current final config still refits the final XGBoost/MLP models and retunes the blend unless you change those config flags.
 
 During each league pass the CLI prints the active data split and the league-level parameters in this format:
 
@@ -151,6 +175,21 @@ Useful flags:
 - `--force-refit`: reuse cached season-specific tuning, but refit final models and retune the blend.
 - `--force-retune`: retune league parameters, XGBoost, MLP, and blend settings from scratch.
 - `--full-report`: print the long diagnostic tables in the terminal. By default they are written to CSV files.
+- `--market-odds opening|closing`: choose which odds snapshot is converted to market-implied probabilities.
+- `--betting-odds opening|closing`: choose which odds snapshot is used as the simulated bet price.
+- `--no-market-movement`: disable closing-minus-opening movement features.
+
+For a clean pre-match betting backtest, use:
+
+```bash
+python backtest_season.py --season 2024 --market-odds opening --betting-odds opening --no-market-movement
+```
+
+For a closing-market benchmark, use the default command:
+
+```bash
+python backtest_season.py --season 2024
+```
 
 Season backtests also print two compact diagnostics:
 
@@ -189,6 +228,8 @@ The main reported metrics are:
 - Multiclass Brier score
 - Expected calibration error
 - Accuracy
+- Macro F1
+- Home/draw/away precision and recall
 
 The training pipeline uses:
 
@@ -196,7 +237,13 @@ The training pipeline uses:
 - league-level parameter tuning on the validation period
 - early / late validation sub-splits for meta-model and blend tuning
 
-Betting evaluation is a simulation, not a claim of deployable profitability. The current implementation uses:
+Betting evaluation is a simulation, not a claim of deployable profitability. The implementation now separates:
+
+- market odds snapshot: the odds used to build market-implied probabilities/features
+- betting odds snapshot: the odds used as the simulated price taken
+- market movement features: closing probabilities minus opening probabilities, only appropriate for closing-time experiments
+
+The current implementation uses:
 
 - edge threshold `0.05`
 - fractional Kelly staking with `kelly_fraction=0.25`

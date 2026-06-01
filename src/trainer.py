@@ -49,6 +49,7 @@ from src.feature_builder import (
 )
 from src.models.base import tune_league_params
 from src.models.meta import (
+    apply_market_logit_correction,
     blend_probabilities,
     fit_xgb_model,
     make_logreg_pipeline,
@@ -57,6 +58,7 @@ from src.models.meta import (
     tune_feature_subset,
     tune_blend_weights,
     tune_logreg_hyperparams,
+    tune_market_logit_correction,
     tune_mlp_feature_subset,
     tune_mlp_hyperparams,
     tune_xgb_hyperparams,
@@ -66,9 +68,10 @@ from src.reporting_ext import print_confusion, print_prob_report
 from src.services.upcoming import generate_upcoming_matchday_picks
 from src.state_builder import streaming_block_probs_home_away
 from src.external_context import EXTERNAL_CONTEXT_VALUE_COLUMNS, MATCH_CONTEXT_FILE
+from src.metrics import class_metric_summary
 
 
-PIPELINE_VERSION = 8
+PIPELINE_VERSION = 13
 
 PARAMETER_IMPACT_BASELINE = {
     "K": 50,
@@ -109,6 +112,18 @@ def _match_info_records(df, league: str) -> list[dict]:
     for row in records:
         row["league"] = league
     return records
+
+
+def _chronological_fold_masks(match_info: list[dict], n_folds: int = 2) -> list[np.ndarray]:
+    if n_folds <= 1 or len(match_info) < n_folds:
+        return []
+    order = np.array(sorted(range(len(match_info)), key=lambda i: str(match_info[i].get("date", ""))))
+    masks = []
+    for fold_indices in np.array_split(order, n_folds):
+        mask = np.zeros(len(match_info), dtype=bool)
+        mask[fold_indices] = True
+        masks.append(mask)
+    return masks
 
 
 def _split_played_periods(df, config: ExperimentConfig):
@@ -153,7 +168,15 @@ def _cached_artifacts_are_compatible(config: ExperimentConfig) -> bool:
 
     manifest_config = manifest.get("config", {})
     expected_config = config.as_manifest()
-    for key in ("experiment_name", "train_cut", "test_cut", "leagues"):
+    for key in (
+        "experiment_name",
+        "train_cut",
+        "test_cut",
+        "leagues",
+        "market_odds_source",
+        "betting_odds_source",
+        "include_market_movement_features",
+    ):
         if manifest_config.get(key) != expected_config.get(key):
             print(f"Cached artifact config mismatch for {key}; retuning/refitting artifacts.")
             return False
@@ -182,16 +205,122 @@ def _model_summary_row(name: str, probs: np.ndarray, y_true: np.ndarray, raw_odd
     )
     accuracy = float((np.argmax(probs, axis=1) == y_true).mean())
     hit_rate = (wins / bets * 100.0) if bets > 0 else 0.0
+    class_metrics = class_metric_summary(probs, y_true)
     return {
         "name": name,
         "logloss": float(log_loss(y_true, probs)),
         "accuracy": accuracy,
+        **class_metrics,
         "bets": int(bets),
         "hit_rate": float(hit_rate),
         "roi": float(roi),
         "profit": float(profit),
         "avg_odds": float(avg_odds),
     }
+
+
+def write_class_marginal_calibration(config, run_ts, probs_by_split, y_by_split):
+    """Diagnose per-class marginal calibration: how close is each model's *average*
+    predicted probability for an outcome to how often that outcome actually happens.
+
+    This separates two different explanations for the near-zero draw recall:
+      - mean draw prob ~= actual draw rate -> draws are priced correctly on average and
+        the low draw *recall* is an argmax artifact (a draw is rarely the single most
+        likely outcome), not a probability defect to fix.
+      - mean draw prob << actual draw rate -> the model systematically under-predicts
+        draws and there is a real probability gap worth closing.
+    """
+    class_names = ("home", "draw", "away")
+    rows = []
+    for split, probs_by_model in probs_by_split.items():
+        y = np.asarray(y_by_split[split])
+        actual = {c: float((y == i).mean()) for i, c in enumerate(class_names)}
+        for model, probs in probs_by_model.items():
+            probs = np.asarray(probs)
+            pred = np.argmax(probs, axis=1)
+            row = {
+                "run_ts_utc": run_ts,
+                "experiment_name": config.experiment_name,
+                "split": split,
+                "model": model,
+                "n": int(len(y)),
+            }
+            for i, c in enumerate(class_names):
+                row[f"mean_prob_{c}"] = round(float(probs[:, i].mean()), 6)
+                row[f"actual_rate_{c}"] = round(actual[c], 6)
+                row[f"pick_rate_{c}"] = round(float((pred == i).mean()), 6)
+            rows.append(row)
+    out_file = config.artifacts_dir / f"final_class_calibration_{config.experiment_name}.csv"
+    append_rows_to_csv(out_file, rows)
+    print("\nPer-class marginal calibration (draw focus: mean predicted prob vs actual rate):")
+    print(f"  {'split':<11}{'model':<9}{'mean_p_draw':>12}{'actual':>8}{'pick':>7}")
+    for row in rows:
+        print(
+            f"  {row['split']:<11}{row['model']:<9}"
+            f"{row['mean_prob_draw']:>12.3f}{row['actual_rate_draw']:>8.3f}{row['pick_rate_draw']:>7.3f}"
+        )
+    return rows
+
+
+def write_per_match_predictions(config, run_ts, probs_by_model, y_true, raw_odds, match_info):
+    """Dump per-match test predictions so confidence intervals can be computed offline
+    from the exact probabilities and odds used in the pipeline -- no re-derivation, no
+    drift. The file is overwritten each run (one row per test match, latest run only)."""
+    import csv as _csv
+
+    y_true = np.asarray(y_true)
+    raw_odds = np.asarray(raw_odds)
+    model_names = list(probs_by_model)
+    rows = []
+    for i, info in enumerate(match_info):
+        row = {
+            "run_ts_utc": run_ts,
+            "experiment_name": config.experiment_name,
+            "league": info.get("league", ""),
+            "date": str(info.get("date", "")),
+            "home_team": info.get("home_team", ""),
+            "away_team": info.get("away_team", ""),
+            "y_true": int(y_true[i]),
+            "odds_h": float(raw_odds[i, 0]),
+            "odds_d": float(raw_odds[i, 1]),
+            "odds_a": float(raw_odds[i, 2]),
+        }
+        # Carry opening/closing odds through so closing-line value can be computed offline.
+        for key in ("open_odds_home", "open_odds_draw", "open_odds_away",
+                    "close_odds_home", "close_odds_draw", "close_odds_away"):
+            try:
+                value = float(info.get(key))
+            except (TypeError, ValueError):
+                value = float("nan")
+            row[key] = value if np.isfinite(value) else ""
+        for model in model_names:
+            p = np.asarray(probs_by_model[model])[i]
+            row[f"{model}_p_h"] = round(float(p[0]), 6)
+            row[f"{model}_p_d"] = round(float(p[1]), 6)
+            row[f"{model}_p_a"] = round(float(p[2]), 6)
+        rows.append(row)
+    if not rows:
+        return rows
+    out_file = config.artifacts_dir / f"final_per_match_predictions_{config.experiment_name}.csv"
+    with open(out_file, "w", newline="", encoding="utf-8") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Wrote per-match predictions: {out_file}")
+    return rows
+
+
+def _validate_odds_source_config(config: ExperimentConfig) -> None:
+    valid_sources = {"opening", "closing", "legacy"}
+    if config.market_odds_source not in valid_sources:
+        raise ValueError(f"market_odds_source must be one of {sorted(valid_sources)}, got {config.market_odds_source!r}")
+    if config.betting_odds_source not in valid_sources:
+        raise ValueError(f"betting_odds_source must be one of {sorted(valid_sources)}, got {config.betting_odds_source!r}")
+    if config.market_odds_source == "opening" and config.include_market_movement_features:
+        print(
+            "WARNING: opening-market experiment includes closing movement features. "
+            "Disable include_market_movement_features for a clean pre-match/opening-odds setup."
+        )
 
 
 def _league_param_text(params: dict) -> str:
@@ -353,24 +482,39 @@ def _print_model_selection_summary(rows: list[dict], *, full_report: bool = True
     return best_logloss, best_roi
 
 
-def _select_recommended_betting_model(rows: list[dict], probability_winner: dict):
-    eligible_names = {"market", "logreg", "meta", "ensemble"}
-    eligible = [
+def _select_recommended_betting_model(validation_rows: list[dict], test_rows: list[dict]):
+    """Pick the betting model using validation ROI only, then report its test row.
+
+    The decision (which model, and whether to bet at all) is locked on the validation
+    split so the crowned winner is not chosen by peeking at the test set -- with several
+    models, the model with the best *test* ROI is upward biased by selection alone. The
+    returned row is the selected model's *test* row, so the reported ROI/profit stay
+    honest out-of-sample numbers; they are just no longer used to make the choice.
+    """
+    eligible_names = {"market", "market_corr", "logreg", "meta", "ensemble"}
+    test_by_name = {row["name"]: row for row in test_rows}
+
+    val_eligible = [
         row
-        for row in _betting_roi_candidates(rows)
+        for row in _betting_roi_candidates(validation_rows)
         if row["name"] in eligible_names and np.isfinite(row["logloss"])
     ]
-    if not eligible:
-        return _no_bet_row(), "no_eligible_model_with_bets"
+    if not val_eligible:
+        return _no_bet_row(), "no_eligible_model_with_validation_bets"
 
-    best_roi = max(eligible, key=lambda r: r["roi"])
-    if best_roi["roi"] <= 0:
-        return _no_bet_row(), "no_positive_roi_among_models_with_bets"
+    val_best = max(val_eligible, key=lambda r: r["roi"])
+    if val_best["roi"] <= 0:
+        return _no_bet_row(), "no_positive_validation_roi"
 
-    logloss_gap = best_roi["logloss"] - probability_winner["logloss"]
+    val_probability_winner = min(validation_rows, key=lambda r: r["logloss"])
+    logloss_gap = val_best["logloss"] - val_probability_winner["logloss"]
     if logloss_gap > 0.01:
-        return _no_bet_row(), "positive_roi_candidate_failed_logloss_guard"
-    return best_roi, "positive_roi_stable_candidate"
+        return _no_bet_row(), "validation_roi_candidate_failed_logloss_guard"
+
+    test_row = test_by_name.get(val_best["name"])
+    if test_row is None or int(test_row.get("bets", 0)) <= 0:
+        return _no_bet_row(), "validation_selected_model_made_no_test_bets"
+    return test_row, "validation_locked_positive_roi"
 
 
 def _write_final_summary(config: ExperimentConfig, selection_rows: list[dict], ablation_rows: list[dict], run_ts: str):
@@ -382,6 +526,13 @@ def _write_final_summary(config: ExperimentConfig, selection_rows: list[dict], a
             "model": row["name"],
             "logloss": round(row["logloss"], 6),
             "accuracy": round(row["accuracy"], 6),
+            "macro_f1": round(row["macro_f1"], 6),
+            "home_recall": round(row["home_recall"], 6),
+            "draw_recall": round(row["draw_recall"], 6),
+            "away_recall": round(row["away_recall"], 6),
+            "home_precision": round(row["home_precision"], 6),
+            "draw_precision": round(row["draw_precision"], 6),
+            "away_precision": round(row["away_precision"], 6),
             "bets": row["bets"],
             "hit_rate": round(row["hit_rate"], 4),
             "roi": round(row["roi"], 4),
@@ -412,6 +563,10 @@ def _write_final_summary(config: ExperimentConfig, selection_rows: list[dict], a
                 "feature_set": row["feature_set"],
                 "logloss": round(row["logloss"], 6),
                 "accuracy": round(row["accuracy"], 6),
+                "macro_f1": round(row["macro_f1"], 6),
+                "home_recall": round(row["home_recall"], 6),
+                "draw_recall": round(row["draw_recall"], 6),
+                "away_recall": round(row["away_recall"], 6),
             })
     append_rows_to_csv(config.final_ablation_summary_file, final_ablation_rows)
 
@@ -563,15 +718,24 @@ def _print_concise_run_summary(
 
 
 def _ablation_row(model_name: str, feature_set: str, probs: np.ndarray, y_true: np.ndarray):
+    class_metrics = class_metric_summary(probs, y_true)
     return {
         "model": model_name,
         "feature_set": feature_set,
         "logloss": float(log_loss(y_true, probs)),
         "accuracy": float((np.argmax(probs, axis=1) == y_true).mean()),
+        **class_metrics,
     }
 
 
 def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
+    _validate_odds_source_config(config)
+    print(
+        "Odds setup: "
+        f"market={config.market_odds_source}, "
+        f"betting_price={config.betting_odds_source}, "
+        f"market_movement_features={config.include_market_movement_features}"
+    )
     compatible_cache = config.use_cached_artifacts and _cached_artifacts_are_compatible(config)
     can_load_param_cache = compatible_cache or config.allow_partial_param_cache
     cached_params = load_json_if_exists(config.params_file) if config.use_cached_artifacts and can_load_param_cache and not config.force_retune_leagues else None
@@ -619,8 +783,31 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             _print_league_params(params, source="tuned")
 
         val_early, val_late = time_split_val(val)
-        ve_probs_raw, ve_y, ve_mkt, ve_aux, _ = streaming_block_probs_home_away(val_early, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
-        vl_probs_raw, vl_y, vl_mkt, vl_aux, vl_raw_odds = streaming_block_probs_home_away(val_late, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
+        odds_kwargs = {
+            "market_odds_source": config.market_odds_source,
+            "betting_odds_source": config.betting_odds_source,
+            "include_market_movement_features": config.include_market_movement_features,
+        }
+        ve_probs_raw, ve_y, ve_mkt, ve_aux, _ = streaming_block_probs_home_away(
+            val_early,
+            df,
+            params["beta"],
+            params["rho"],
+            params["decay"],
+            params["K"],
+            params["ha"],
+            **odds_kwargs,
+        )
+        vl_probs_raw, vl_y, vl_mkt, vl_aux, vl_raw_odds = streaming_block_probs_home_away(
+            val_late,
+            df,
+            params["beta"],
+            params["rho"],
+            params["decay"],
+            params["K"],
+            params["ha"],
+            **odds_kwargs,
+        )
         ve_probs_model = temperature_scale_probs(ve_probs_raw, params["T"])
         vl_probs_model = temperature_scale_probs(vl_probs_raw, params["T"])
 
@@ -631,7 +818,16 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         all_late_raw_odds.extend(vl_raw_odds)
         all_late_info.extend(_match_info_records(val_late, league))
 
-        v_probs_raw, v_y, v_mkt, v_aux, _ = streaming_block_probs_home_away(val, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
+        v_probs_raw, v_y, v_mkt, v_aux, _ = streaming_block_probs_home_away(
+            val,
+            df,
+            params["beta"],
+            params["rho"],
+            params["decay"],
+            params["K"],
+            params["ha"],
+            **odds_kwargs,
+        )
         v_probs_model = temperature_scale_probs(v_probs_raw, params["T"])
         v_mkt_fixed = ensure_market_probs(v_probs_model, v_mkt)
         all_X_val.extend(build_meta_features(v_probs_model, v_mkt_fixed, v_aux))
@@ -639,7 +835,16 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         val_info = _match_info_records(val, league)
         all_v_info.extend(val_info)
 
-        t_probs_raw, t_y, t_mkt, t_aux, t_raw_odds = streaming_block_probs_home_away(test, df, params["beta"], params["rho"], params["decay"], params["K"], params["ha"])
+        t_probs_raw, t_y, t_mkt, t_aux, t_raw_odds = streaming_block_probs_home_away(
+            test,
+            df,
+            params["beta"],
+            params["rho"],
+            params["decay"],
+            params["K"],
+            params["ha"],
+            **odds_kwargs,
+        )
         t_probs_model = temperature_scale_probs(t_probs_raw, params["T"])
         t_mkt_fixed = ensure_market_probs(t_probs_model, t_mkt)
 
@@ -652,6 +857,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
                 PARAMETER_IMPACT_BASELINE["decay"],
                 PARAMETER_IMPACT_BASELINE["K"],
                 PARAMETER_IMPACT_BASELINE["ha"],
+                **odds_kwargs,
             )
             baseline_probs = temperature_scale_probs(baseline_raw, PARAMETER_IMPACT_BASELINE["T"])
             if not np.array_equal(np.array(t_y, dtype=int), np.array(baseline_y, dtype=int)):
@@ -964,6 +1170,8 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     print(f"LogReg feature set: {logreg_cfg['feature_set']} ({len(logreg_cols)} features)")
     logreg_final = make_logreg_pipeline(logreg_cfg["C"])
     logreg_final.fit(X_val_arr[:, logreg_cols], y_val_arr)
+    save_json(config.logreg_meta_file, logreg_cfg)
+    save_pickle(config.logreg_model_file, logreg_final)
 
     xgb_late_model = fit_xgb_model(X_early_arr[:, xgb_cols], y_early_arr, best_meta_cfg)
     late_probs_xgb = xgb_late_model.predict_proba(X_late_arr[:, xgb_cols])
@@ -979,6 +1187,40 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     late_probs_logreg = temperature_scale_probs(late_probs_logreg_raw, float(logreg_cfg["temperature"]))
     late_market_ll = float(log_loss(y_late_arr, late_probs_mkt))
     late_mlp_ll = float(log_loss(y_late_arr, late_probs_mlp))
+    if cached_blend is not None and "market_correction" in cached_blend and not config.force_retune_blend:
+        market_corr_cfg = cached_blend["market_correction"]
+    else:
+        market_corr_cfg = tune_market_logit_correction(
+            y_late_arr,
+            late_probs_mkt,
+            {
+                "base": late_probs_base,
+                "xgb": late_probs_xgb,
+                "mlp": late_probs_mlp,
+            },
+            min_improvement=0.0005,
+            fold_masks=_chronological_fold_masks(all_late_info, n_folds=2),
+            min_fold_improvement=0.0,
+        )
+    late_probs_market_corr = apply_market_logit_correction(
+        late_probs_mkt,
+        {
+            "base": late_probs_base,
+            "xgb": late_probs_xgb,
+            "mlp": late_probs_mlp,
+        },
+        market_corr_cfg,
+    )
+    corr_status = "accepted" if market_corr_cfg.get("accepted") else "collapsed_to_market"
+    print(
+        "Market correction "
+        f"({corr_status}): source={market_corr_cfg.get('source_model')} "
+        f"alpha={float(market_corr_cfg.get('alpha', 0.0)):.3f} "
+        f"late_val_logloss={float(market_corr_cfg.get('late_val_logloss', late_market_ll)):.4f} "
+        f"market={late_market_ll:.4f}"
+    )
+    if market_corr_cfg.get("rejection_reason"):
+        print(f"Market correction rejected: {market_corr_cfg['rejection_reason']}")
     mlp_allowed_in_blend = late_mlp_ll < late_market_ll - 0.002
     if not mlp_allowed_in_blend:
         print(
@@ -1000,8 +1242,11 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         )
         blend_cfg["mlp_allowed"] = bool(mlp_allowed_in_blend)
         blend_cfg["mlp_gate"] = {"late_mlp_logloss": late_mlp_ll, "late_market_logloss": late_market_ll, "margin_required": 0.002}
+        blend_cfg["market_correction"] = market_corr_cfg
         save_json(config.blend_file, blend_cfg)
         print(f"Saved blend weights to: {config.blend_file}")
+    if "market_correction" not in blend_cfg:
+        blend_cfg["market_correction"] = market_corr_cfg
     print(f"Blend weights: {blend_cfg['weights']}")
     _print_blend_weight_summary(blend_cfg)
     print(f"Late VAL LogLoss: {round(blend_cfg['late_val_logloss'], 4)}")
@@ -1020,6 +1265,15 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     t_probs_mlp = temperature_scale_probs(t_probs_mlp_raw, float(best_mlp_cfg["temperature"]))
     t_probs_logreg_raw = logreg_final.predict_proba(X_test_arr[:, logreg_cols])
     t_probs_logreg = temperature_scale_probs(t_probs_logreg_raw, float(logreg_cfg["temperature"]))
+    t_probs_market_corr = apply_market_logit_correction(
+        t_mkt_fixed_arr,
+        {
+            "base": t_probs_model_arr,
+            "xgb": t_probs_meta,
+            "mlp": t_probs_mlp,
+        },
+        blend_cfg.get("market_correction", market_corr_cfg),
+    )
     t_probs_blend = blend_probabilities(
         blend_cfg["weights"],
         {
@@ -1128,13 +1382,23 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     selection_rows = [
         _model_summary_row("base", t_probs_model_arr, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("market", t_mkt_fixed_arr, y_test_arr, raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("market_corr", t_probs_market_corr, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("meta", t_probs_meta, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("logreg", t_probs_logreg, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("mlp", t_probs_mlp, y_test_arr, raw_odds_arr, edge_threshold=threshold),
         _model_summary_row("ensemble", t_probs_blend, y_test_arr, raw_odds_arr, edge_threshold=threshold),
     ]
+    validation_selection_rows = [
+        _model_summary_row("base", late_probs_base, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("market", late_probs_mkt, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("market_corr", late_probs_market_corr, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("meta", late_probs_xgb, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("logreg", late_probs_logreg, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("mlp", late_probs_mlp, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+        _model_summary_row("ensemble", late_probs_blend, y_late_arr, late_raw_odds_arr, edge_threshold=threshold),
+    ]
     best_logloss, best_roi = _print_model_selection_summary(selection_rows, full_report=config.print_full_reports)
-    recommended_betting, betting_reason = _select_recommended_betting_model(selection_rows, best_logloss)
+    recommended_betting, betting_reason = _select_recommended_betting_model(validation_selection_rows, selection_rows)
     if config.print_full_reports:
         print("Recommended betting model:", recommended_betting["name"], f"({betting_reason})")
 
@@ -1150,6 +1414,13 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "model": row["name"],
             "logloss": round(row["logloss"], 6),
             "accuracy": round(row["accuracy"], 6),
+            "macro_f1": round(row["macro_f1"], 6),
+            "home_recall": round(row["home_recall"], 6),
+            "draw_recall": round(row["draw_recall"], 6),
+            "away_recall": round(row["away_recall"], 6),
+            "home_precision": round(row["home_precision"], 6),
+            "draw_precision": round(row["draw_precision"], 6),
+            "away_precision": round(row["away_precision"], 6),
             "bets": row["bets"],
             "hit_rate": round(row["hit_rate"], 4),
             "roi": round(row["roi"], 4),
@@ -1169,12 +1440,17 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "feature_set": row["feature_set"],
             "logloss": round(row["logloss"], 6),
             "accuracy": round(row["accuracy"], 6),
+            "macro_f1": round(row["macro_f1"], 6),
+            "home_recall": round(row["home_recall"], 6),
+            "draw_recall": round(row["draw_recall"], 6),
+            "away_recall": round(row["away_recall"], 6),
         })
     append_rows_to_csv(config.ablations_csv_file, ablation_csv_rows)
     _write_final_summary(config, selection_rows, ablation_rows, run_ts)
     late_validation_strategy_probs = {
         "base": late_probs_base,
         "market": late_probs_mkt,
+        "market_corr": late_probs_market_corr,
         "meta": late_probs_xgb,
         "logreg": late_probs_logreg,
         "mlp": late_probs_mlp,
@@ -1183,6 +1459,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
     test_strategy_probs = {
         "base": t_probs_model_arr,
         "market": t_mkt_fixed_arr,
+        "market_corr": t_probs_market_corr,
         "meta": t_probs_meta,
         "logreg": t_probs_logreg,
         "mlp": t_probs_mlp,
@@ -1199,6 +1476,26 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             "validation": y_late_arr,
             "test": y_test_arr,
         },
+    )
+    write_class_marginal_calibration(
+        config,
+        run_ts,
+        {
+            "validation": late_validation_strategy_probs,
+            "test": test_strategy_probs,
+        },
+        {
+            "validation": y_late_arr,
+            "test": y_test_arr,
+        },
+    )
+    write_per_match_predictions(
+        config,
+        run_ts,
+        test_strategy_probs,
+        y_test_arr,
+        raw_odds_arr,
+        all_t_info,
     )
     selector_rows = write_validation_selected_betting_reports(
         config,
@@ -1305,6 +1602,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             strategy_probs={
                 "base": t_probs_model_arr,
                 "market": t_mkt_fixed_arr,
+                "market_corr": t_probs_market_corr,
                 "meta": t_probs_meta,
                 "mlp": t_probs_mlp,
                 "logreg": t_probs_logreg,
@@ -1353,6 +1651,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "mlp": best_mlp_cfg,
         "mlp_feature_columns": mlp_feature_columns,
         "mlp_n_features": len(mlp_feature_columns),
+        "market_correction": blend_cfg.get("market_correction", market_corr_cfg),
         "blend": blend_cfg,
         "parameter_impact": parameter_impact_rows,
         "selection_summary": {
@@ -1374,6 +1673,8 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             best_meta_cfg,
             mlp_model,
             best_mlp_cfg,
+            logreg_model=logreg_final,
+            logreg_cfg=logreg_cfg,
             max_window_days=config.max_upcoming_window_days,
             pick_model=best_logloss["name"],
         )

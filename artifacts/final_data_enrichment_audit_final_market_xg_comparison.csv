@@ -99,3 +99,43 @@ run_ts_utc,experiment_name,split,data_group,matches,available_rows,coverage,stat
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,test,manager_changes,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,test,live_odds_snapshots,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,test,weather,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,opening_1x2_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,closing_1x2_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,ou25_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,asian_handicap_line,1752,1752,100.0,partial,Line is loaded; handicap odds are not currently loaded.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,confirmed_lineups,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,injuries,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,suspensions,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,manager_changes,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,live_odds_snapshots,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,validation,weather,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,opening_1x2_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,closing_1x2_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,ou25_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,asian_handicap_line,1573,1573,100.0,partial,Line is loaded; handicap odds are not currently loaded.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,confirmed_lineups,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,injuries,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,suspensions,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,manager_changes,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,live_odds_snapshots,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,test,weather,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,opening_1x2_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,closing_1x2_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,ou25_odds,1752,1752,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,asian_handicap_line,1752,1752,100.0,partial,Line is loaded; handicap odds are not currently loaded.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,confirmed_lineups,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,injuries,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,suspensions,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,manager_changes,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,live_odds_snapshots,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,validation,weather,1752,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,opening_1x2_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,closing_1x2_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,ou25_odds,1573,1573,100.0,available,Loaded from football-data columns.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,asian_handicap_line,1573,1573,100.0,partial,Line is loaded; handicap odds are not currently loaded.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,confirmed_lineups,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,injuries,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,suspensions,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,manager_changes,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,live_odds_snapshots,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,test,weather,1573,0,0.0,not_in_current_dataset,Needs an external source before it can be modeled honestly.

@@ -29,3 +29,6 @@ model_explanation_local.txt
 data/external/*.csv
 data/external/*.parquet
 data/external/api_football_cache/
+
+# Reference literature PDFs (kept local, not versioned).
+papers/

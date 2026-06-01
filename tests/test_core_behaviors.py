@@ -13,13 +13,15 @@ import src.update_api_football_context as api_football_context
 import src.data_processing as data_processing
 from update_team_news import _backtest_window
 from src.cli.backtest_season_cli import build_backtest_config, season_window
+from src.calibration import temperature_scale_probs
 from src.config import ExperimentConfig
 from src.evaluation import betting_records, simulate_value_betting
 from src.external_context import add_external_match_context
 from src.feature_builder import ensure_market_probs, feature_indices, market_probs_from_odds_row
+from src.metrics import class_metric_summary
 from src.models.base import _validation_rows_with_elo
-from src.models.meta import blend_probabilities
-from src.state_builder import EXTRA_AUX_LEN, compute_pre_match_extra_features
+from src.models.meta import blend_probabilities, market_logit_correction_probs, tune_market_logit_correction
+from src.state_builder import EXTRA_AUX_LEN, compute_pre_match_extra_features, odds_triplet_from_row
 from src.team_names import normalize_team_name
 from src.trainer import (
     _best_betting_roi_row,
@@ -66,6 +68,21 @@ class FeatureBuilderTests(unittest.TestCase):
 
         np.testing.assert_allclose(fixed[0], model[0])
         np.testing.assert_allclose(fixed[1], market[1])
+
+
+class MetricTests(unittest.TestCase):
+    def test_class_metric_summary_reports_draw_recall(self):
+        probs = np.array([
+            [0.7, 0.2, 0.1],
+            [0.2, 0.6, 0.2],
+            [0.4, 0.3, 0.3],
+        ])
+        y_true = np.array([0, 1, 1])
+
+        metrics = class_metric_summary(probs, y_true)
+
+        self.assertAlmostEqual(metrics["draw_recall"], 0.5)
+        self.assertGreater(metrics["macro_f1"], 0.0)
 
 
 class TeamNameTests(unittest.TestCase):
@@ -124,6 +141,21 @@ class SeasonBacktestTests(unittest.TestCase):
         self.assertEqual(config.test_cut, "2024-07-01")
         self.assertEqual(config.test_end, "2025-07-01")
         self.assertTrue(config.allow_partial_param_cache)
+
+    def test_opening_backtest_config_disables_market_movement_by_default(self):
+        config = build_backtest_config(
+            2024,
+            market_odds_source="opening",
+            betting_odds_source="opening",
+        )
+
+        self.assertEqual(
+            config.experiment_name,
+            "season_backtest_2024_2025_opening_market_opening_price_no_move",
+        )
+        self.assertEqual(config.market_odds_source, "opening")
+        self.assertEqual(config.betting_odds_source, "opening")
+        self.assertFalse(config.include_market_movement_features)
         self.assertTrue(config.print_parameter_impact)
         self.assertFalse(config.generate_upcoming_picks)
 
@@ -190,6 +222,57 @@ class ArtifactStoreTests(unittest.TestCase):
 
 
 class ModelSelectionTests(unittest.TestCase):
+    def test_temperature_scaling_identity_at_one(self):
+        probs = np.array([
+            [0.50, 0.30, 0.20],
+            [0.20, 0.35, 0.45],
+        ])
+
+        scaled = temperature_scale_probs(probs, T=1.0)
+
+        np.testing.assert_allclose(scaled, probs, atol=1e-12)
+
+    def test_market_logit_correction_alpha_zero_returns_market(self):
+        market = np.array([
+            [0.50, 0.30, 0.20],
+            [0.25, 0.35, 0.40],
+        ])
+        correction = np.array([
+            [0.80, 0.10, 0.10],
+            [0.10, 0.20, 0.70],
+        ])
+
+        out = market_logit_correction_probs(market, correction, alpha=0.0)
+
+        np.testing.assert_allclose(out, market)
+
+    def test_market_logit_correction_tuning_selects_helpful_source(self):
+        y = np.array([0, 1, 2, 0])
+        market = np.array([
+            [0.45, 0.30, 0.25],
+            [0.30, 0.40, 0.30],
+            [0.30, 0.30, 0.40],
+            [0.42, 0.31, 0.27],
+        ])
+        xgb = np.array([
+            [0.80, 0.10, 0.10],
+            [0.10, 0.80, 0.10],
+            [0.10, 0.10, 0.80],
+            [0.75, 0.15, 0.10],
+        ])
+
+        cfg = tune_market_logit_correction(
+            y,
+            market,
+            {"xgb": xgb},
+            alpha_grid=[0.0, 0.5, 1.0],
+            min_improvement=0.0,
+        )
+
+        self.assertEqual(cfg["source_model"], "xgb")
+        self.assertGreater(cfg["alpha"], 0.0)
+        self.assertTrue(cfg["accepted"])
+
     def test_effective_blend_weights_normalize_active_models(self):
         effective = _effective_blend_weights({
             "weights": {"base": 0.0, "market": 0.05, "xgb": 0.0, "mlp": 0.5},
@@ -253,9 +336,30 @@ class ModelSelectionTests(unittest.TestCase):
         ]
 
         self.assertEqual(_best_betting_roi_row(rows)["name"], "ensemble")
-        recommended, reason = _select_recommended_betting_model(rows, rows[0])
+        recommended, reason = _select_recommended_betting_model(rows, rows)
         self.assertEqual(recommended["name"], "no_bet")
-        self.assertEqual(reason, "no_positive_roi_among_models_with_bets")
+        self.assertEqual(reason, "no_positive_validation_roi")
+
+    def test_recommendation_locks_on_validation_but_reports_test_row(self):
+        # logreg looks best on validation; ensemble only looks good on test.
+        # The recommendation must follow validation, and report logreg's test row.
+        validation_rows = [
+            {"name": "market", "logloss": 0.95, "accuracy": 0.55, "bets": 0, "hit_rate": 0.0, "roi": 0.0, "profit": 0.0, "avg_odds": 0.0},
+            {"name": "logreg", "logloss": 0.951, "accuracy": 0.55, "bets": 120, "hit_rate": 35.0, "roi": 4.0, "profit": 1.0, "avg_odds": 3.0},
+            {"name": "ensemble", "logloss": 0.96, "accuracy": 0.55, "bets": 80, "hit_rate": 30.0, "roi": 1.0, "profit": 0.2, "avg_odds": 3.5},
+        ]
+        test_rows = [
+            {"name": "market", "logloss": 0.95, "accuracy": 0.55, "bets": 0, "hit_rate": 0.0, "roi": 0.0, "profit": 0.0, "avg_odds": 0.0},
+            {"name": "logreg", "logloss": 0.952, "accuracy": 0.55, "bets": 110, "hit_rate": 33.0, "roi": -1.5, "profit": -0.3, "avg_odds": 3.0},
+            {"name": "ensemble", "logloss": 0.961, "accuracy": 0.55, "bets": 70, "hit_rate": 31.0, "roi": 9.9, "profit": 0.8, "avg_odds": 3.5},
+        ]
+
+        recommended, reason = _select_recommended_betting_model(validation_rows, test_rows)
+
+        self.assertEqual(recommended["name"], "logreg")
+        self.assertEqual(reason, "validation_locked_positive_roi")
+        # Reported ROI is the honest out-of-sample test number, not the validation one.
+        self.assertEqual(recommended["roi"], -1.5)
 
 
 class WeatherContextTests(unittest.TestCase):
@@ -554,12 +658,63 @@ class BlendTests(unittest.TestCase):
 
 
 class RollingFeatureTests(unittest.TestCase):
+    def _extra_feature_map(self, features: np.ndarray, names: list[str]) -> dict[str, float]:
+        offset = 6 + 12
+        return {
+            name: float(features[feature_indices([name])[0] - offset])
+            for name in names
+        }
+
+    def test_odds_triplet_respects_requested_snapshot(self):
+        row = pd.Series({
+            "odds_home": 1.7,
+            "odds_draw": 3.6,
+            "odds_away": 5.2,
+            "open_odds_home": 2.0,
+            "open_odds_draw": 3.4,
+            "open_odds_away": 4.1,
+            "close_odds_home": 1.8,
+            "close_odds_draw": 3.2,
+            "close_odds_away": 4.5,
+        })
+
+        self.assertEqual(odds_triplet_from_row(row, "opening"), (2.0, 3.4, 4.1))
+        self.assertEqual(odds_triplet_from_row(row, "closing"), (1.8, 3.2, 4.5))
+        self.assertEqual(odds_triplet_from_row(row, "legacy"), (1.7, 3.6, 5.2))
+
+    def test_market_movement_features_can_be_disabled(self):
+        row = pd.Series({
+            "home_team": "A",
+            "away_team": "B",
+            "open_odds_home": 2.0,
+            "open_odds_draw": 3.0,
+            "open_odds_away": 4.0,
+            "close_odds_home": 1.8,
+            "close_odds_draw": 3.2,
+            "close_odds_away": 4.5,
+        })
+
+        features = compute_pre_match_extra_features(
+            row,
+            pd.DataFrame(),
+            include_market_movement_features=False,
+        )
+        feature_map = self._extra_feature_map(features, [
+            "market_move_home",
+            "market_move_draw",
+            "market_move_away",
+        ])
+
+        np.testing.assert_allclose(list(feature_map.values()), np.zeros(3))
+
     def test_pre_match_features_use_only_past_matches(self):
         past = pd.DataFrame([
             {
                 "date": pd.Timestamp("2024-01-01"),
                 "home_team": "A",
                 "away_team": "B",
+                "home_goals": 2,
+                "away_goals": 1,
                 "home_shots": 10,
                 "away_shots": 5,
                 "home_shots_target": 4,
@@ -588,11 +743,42 @@ class RollingFeatureTests(unittest.TestCase):
         features = compute_pre_match_extra_features(row, past)
 
         self.assertEqual(len(features), EXTRA_AUX_LEN)
-        self.assertEqual(features[0], 10.0)
-        self.assertEqual(features[1], 5.0)
-        self.assertEqual(features[2], 5.0)
-        self.assertAlmostEqual(features[15], 0.57)
-        self.assertAlmostEqual(features[16], -0.5)
+        feature_map = self._extra_feature_map(features, [
+            "goals_for_home_5",
+            "goals_for_away_5",
+            "goals_for_diff_5",
+            "goals_against_home_5",
+            "goals_against_away_5",
+            "goals_against_diff_5",
+            "shots_for_home_5",
+            "shots_for_away_5",
+            "shots_for_diff_5",
+            "shots_against_home_5",
+            "shots_against_away_5",
+            "shots_against_diff_5",
+            "cards_home_5",
+            "cards_away_5",
+            "cards_diff_5",
+            "ou25_over_prob",
+            "ah_line",
+        ])
+        self.assertEqual(feature_map["goals_for_home_5"], 2.0)
+        self.assertEqual(feature_map["goals_for_away_5"], 1.0)
+        self.assertEqual(feature_map["goals_for_diff_5"], 1.0)
+        self.assertEqual(feature_map["goals_against_home_5"], 1.0)
+        self.assertEqual(feature_map["goals_against_away_5"], 2.0)
+        self.assertEqual(feature_map["goals_against_diff_5"], -1.0)
+        self.assertEqual(feature_map["shots_for_home_5"], 10.0)
+        self.assertEqual(feature_map["shots_for_away_5"], 5.0)
+        self.assertEqual(feature_map["shots_for_diff_5"], 5.0)
+        self.assertEqual(feature_map["shots_against_home_5"], 5.0)
+        self.assertEqual(feature_map["shots_against_away_5"], 10.0)
+        self.assertEqual(feature_map["shots_against_diff_5"], -5.0)
+        self.assertEqual(feature_map["cards_home_5"], 1.0)
+        self.assertEqual(feature_map["cards_away_5"], 4.0)
+        self.assertEqual(feature_map["cards_diff_5"], -3.0)
+        self.assertAlmostEqual(feature_map["ou25_over_prob"], 0.57)
+        self.assertAlmostEqual(feature_map["ah_line"], -0.5)
 
     def test_pre_match_features_include_external_context(self):
         row = pd.Series({

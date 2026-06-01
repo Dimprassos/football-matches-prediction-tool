@@ -35,6 +35,26 @@ BASE_AUX_LEN = 12
 EXTRA_AUX_LEN = len(FEATURE_COLUMNS) - 6 - BASE_AUX_LEN
 
 
+def odds_triplet_from_row(row: pd.Series, source: str = "closing") -> tuple[float, float, float]:
+    if source == "opening":
+        cols = ("open_odds_home", "open_odds_draw", "open_odds_away")
+    elif source == "closing":
+        cols = ("close_odds_home", "close_odds_draw", "close_odds_away")
+    elif source == "legacy":
+        cols = ("odds_home", "odds_draw", "odds_away")
+    else:
+        raise ValueError(f"Unknown odds source: {source!r}")
+
+    values = [pd.to_numeric(row.get(col, np.nan), errors="coerce") for col in cols]
+    if source == "closing" and not all(np.isfinite(value) for value in values):
+        values = [
+            pd.to_numeric(row.get("odds_home", np.nan), errors="coerce"),
+            pd.to_numeric(row.get("odds_draw", np.nan), errors="coerce"),
+            pd.to_numeric(row.get("odds_away", np.nan), errors="coerce"),
+        ]
+    return tuple(float(value) if np.isfinite(value) else np.nan for value in values)
+
+
 def dynamic_init_rating(ratings: Dict[str, float], init_rating: float = 1500.0) -> float:
     if len(ratings) >= 5:
         bottom_elos = sorted(ratings.values())[:3]
@@ -116,34 +136,64 @@ def get_rest_days(team: str, match_date: pd.Timestamp, last_match_date: Dict[str
 
 
 def _recent_team_means(team: str, past_matches: pd.DataFrame, window: int = 5) -> dict:
+    defaults = {
+        "goals_for": 0.0,
+        "goals_against": 0.0,
+        "shots_for": 0.0,
+        "shots_against": 0.0,
+        "sot_for": 0.0,
+        "sot_against": 0.0,
+        "corners_for": 0.0,
+        "corners_against": 0.0,
+        "cards": 0.0,
+        "uxg": 0.0,
+        "unpxg": 0.0,
+        "uxpts": 0.0,
+    }
     if past_matches.empty:
-        return {"shots": 0.0, "sot": 0.0, "corners": 0.0, "cards": 0.0, "uxg": 0.0, "unpxg": 0.0, "uxpts": 0.0}
+        return defaults.copy()
 
     team_matches = past_matches[
         (past_matches["home_team"] == team) | (past_matches["away_team"] == team)
     ].sort_values("date").tail(window)
     if team_matches.empty:
-        return {"shots": 0.0, "sot": 0.0, "corners": 0.0, "cards": 0.0, "uxg": 0.0, "unpxg": 0.0, "uxpts": 0.0}
+        return defaults.copy()
 
-    values = {"shots": [], "sot": [], "corners": [], "cards": [], "uxg": [], "unpxg": [], "uxpts": []}
+    values = {key: [] for key in defaults}
     for _, row in team_matches.iterrows():
         is_home = row["home_team"] == team
         prefix = "home" if is_home else "away"
+        opp_prefix = "away" if is_home else "home"
+        goals_for = pd.to_numeric(row.get(f"{prefix}_goals"), errors="coerce")
+        goals_against = pd.to_numeric(row.get(f"{opp_prefix}_goals"), errors="coerce")
         shots = pd.to_numeric(row.get(f"{prefix}_shots"), errors="coerce")
+        shots_against = pd.to_numeric(row.get(f"{opp_prefix}_shots"), errors="coerce")
         sot = pd.to_numeric(row.get(f"{prefix}_shots_target"), errors="coerce")
+        sot_against = pd.to_numeric(row.get(f"{opp_prefix}_shots_target"), errors="coerce")
         corners = pd.to_numeric(row.get(f"{prefix}_corners"), errors="coerce")
+        corners_against = pd.to_numeric(row.get(f"{opp_prefix}_corners"), errors="coerce")
         yellows = pd.to_numeric(row.get(f"{prefix}_yellows"), errors="coerce")
         reds = pd.to_numeric(row.get(f"{prefix}_reds"), errors="coerce")
         uxg = pd.to_numeric(row.get(f"{prefix}_understat_xg"), errors="coerce")
         unpxg = pd.to_numeric(row.get(f"{prefix}_understat_npxg"), errors="coerce")
         uxpts = pd.to_numeric(row.get(f"{prefix}_understat_xpts"), errors="coerce")
 
+        if np.isfinite(goals_for):
+            values["goals_for"].append(float(goals_for))
+        if np.isfinite(goals_against):
+            values["goals_against"].append(float(goals_against))
         if np.isfinite(shots):
-            values["shots"].append(float(shots))
+            values["shots_for"].append(float(shots))
+        if np.isfinite(shots_against):
+            values["shots_against"].append(float(shots_against))
         if np.isfinite(sot):
-            values["sot"].append(float(sot))
+            values["sot_for"].append(float(sot))
+        if np.isfinite(sot_against):
+            values["sot_against"].append(float(sot_against))
         if np.isfinite(corners):
-            values["corners"].append(float(corners))
+            values["corners_for"].append(float(corners))
+        if np.isfinite(corners_against):
+            values["corners_against"].append(float(corners_against))
         card_score = (float(yellows) if np.isfinite(yellows) else 0.0) + 2.0 * (float(reds) if np.isfinite(reds) else 0.0)
         values["cards"].append(card_score)
         if np.isfinite(uxg):
@@ -184,23 +234,21 @@ def _weather_severity(temperature_c: float, wind_kph: float, precipitation_mm: f
     return float(min(5.0, temp_discomfort + wind_component + rain_component))
 
 
-def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame, window: int = 5) -> np.ndarray:
+def compute_pre_match_extra_features(
+    row: pd.Series,
+    past_matches: pd.DataFrame,
+    window: int = 5,
+    *,
+    include_market_movement_features: bool = True,
+) -> np.ndarray:
     home = row["home_team"]
     away = row["away_team"]
     home_recent = _recent_team_means(home, past_matches, window=window)
     away_recent = _recent_team_means(away, past_matches, window=window)
 
-    open_probs = market_probs_from_odds_row(
-        row.get("open_odds_home", np.nan),
-        row.get("open_odds_draw", np.nan),
-        row.get("open_odds_away", np.nan),
-    )
-    close_probs = market_probs_from_odds_row(
-        row.get("close_odds_home", row.get("odds_home", np.nan)),
-        row.get("close_odds_draw", row.get("odds_draw", np.nan)),
-        row.get("close_odds_away", row.get("odds_away", np.nan)),
-    )
-    if np.isfinite(open_probs).all() and np.isfinite(close_probs).all():
+    open_probs = market_probs_from_odds_row(*odds_triplet_from_row(row, "opening"))
+    close_probs = market_probs_from_odds_row(*odds_triplet_from_row(row, "closing"))
+    if include_market_movement_features and np.isfinite(open_probs).all() and np.isfinite(close_probs).all():
         market_move = close_probs - open_probs
     else:
         market_move = np.zeros(3, dtype=float)
@@ -228,15 +276,30 @@ def compute_pre_match_extra_features(row: pd.Series, past_matches: pd.DataFrame,
     weather_severity = _weather_severity(temperature_c, wind_kph, precipitation_mm)
 
     extra = np.array([
-        home_recent["shots"],
-        away_recent["shots"],
-        home_recent["shots"] - away_recent["shots"],
-        home_recent["sot"],
-        away_recent["sot"],
-        home_recent["sot"] - away_recent["sot"],
-        home_recent["corners"],
-        away_recent["corners"],
-        home_recent["corners"] - away_recent["corners"],
+        home_recent["goals_for"],
+        away_recent["goals_for"],
+        home_recent["goals_for"] - away_recent["goals_for"],
+        home_recent["goals_against"],
+        away_recent["goals_against"],
+        home_recent["goals_against"] - away_recent["goals_against"],
+        home_recent["shots_for"],
+        away_recent["shots_for"],
+        home_recent["shots_for"] - away_recent["shots_for"],
+        home_recent["shots_against"],
+        away_recent["shots_against"],
+        home_recent["shots_against"] - away_recent["shots_against"],
+        home_recent["sot_for"],
+        away_recent["sot_for"],
+        home_recent["sot_for"] - away_recent["sot_for"],
+        home_recent["sot_against"],
+        away_recent["sot_against"],
+        home_recent["sot_against"] - away_recent["sot_against"],
+        home_recent["corners_for"],
+        away_recent["corners_for"],
+        home_recent["corners_for"] - away_recent["corners_for"],
+        home_recent["corners_against"],
+        away_recent["corners_against"],
+        home_recent["corners_against"] - away_recent["corners_against"],
         home_recent["cards"],
         away_recent["cards"],
         home_recent["cards"] - away_recent["cards"],
@@ -377,7 +440,21 @@ def compute_match_components(home_team: str, away_team: str, state: LeagueState,
     }
 
 
-def streaming_block_probs_home_away(predict_df, full_df, beta, rho, decay, K, home_adv, init_rating=1500.0, max_goals=10):
+def streaming_block_probs_home_away(
+    predict_df,
+    full_df,
+    beta,
+    rho,
+    decay,
+    K,
+    home_adv,
+    init_rating=1500.0,
+    max_goals=10,
+    *,
+    market_odds_source: str = "closing",
+    betting_odds_source: str = "closing",
+    include_market_movement_features: bool = True,
+):
     params = {"beta": beta, "rho": rho, "decay": decay, "K": K, "ha": home_adv}
     probs_model = []
     probs_mkt = []
@@ -413,27 +490,33 @@ def streaming_block_probs_home_away(predict_df, full_df, beta, rho, decay, K, ho
 
         l_avg_h, l_avg_a, att_h, def_h, att_a, def_a = fit_team_strengths_home_away_weighted(
             past_matches, decay=decay
-    )
+        )
         state = LeagueState(
-        ratings=ratings.copy(),
-        elo_history={k: v[:] for k, v in elo_history.items()},
-        last_match_date=last_match_date.copy(),
-        points_history={k: v[:] for k, v in points_history.items()},
-        attack_home=att_h,
-        defense_home=def_h,
-        attack_away=att_a,
-        defense_away=def_a,
-        league_avg_home=l_avg_h,
-        league_avg_away=l_avg_a,
-        params={**params, "K": K, "ha": home_adv},
-    )
+            ratings=ratings.copy(),
+            elo_history={k: v[:] for k, v in elo_history.items()},
+            last_match_date=last_match_date.copy(),
+            points_history={k: v[:] for k, v in points_history.items()},
+            attack_home=att_h,
+            defense_home=def_h,
+            attack_away=att_a,
+            defense_away=def_a,
+            league_avg_home=l_avg_h,
+            league_avg_away=l_avg_a,
+            params={**params, "K": K, "ha": home_adv},
+        )
 
         for _, row in day_matches.iterrows():
-            raw_odds.append([row["odds_home"], row["odds_draw"], row["odds_away"]])
-            extra_aux = compute_pre_match_extra_features(row, past_matches)
+            market_odds = odds_triplet_from_row(row, market_odds_source)
+            betting_odds = odds_triplet_from_row(row, betting_odds_source)
+            raw_odds.append(list(betting_odds))
+            extra_aux = compute_pre_match_extra_features(
+                row,
+                past_matches,
+                include_market_movement_features=include_market_movement_features,
+            )
             comp = compute_match_components(row["home_team"], row["away_team"], state, match_date=row["date"], extra_aux=extra_aux)
             probs_model.append(comp["probs"].tolist())
-            probs_mkt.append(market_probs_from_odds_row(row["odds_home"], row["odds_draw"], row["odds_away"]).tolist())
+            probs_mkt.append(market_probs_from_odds_row(*market_odds).tolist())
             aux.append(comp["aux"].tolist())
             if row["home_goals"] > row["away_goals"]:
                 y_true.append(0)

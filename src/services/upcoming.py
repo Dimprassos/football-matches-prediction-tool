@@ -7,7 +7,7 @@ from src.calibration import temperature_scale_probs
 from src.data_loader import load_league_data
 from src.feature_builder import MLP_DEFAULT_COLS, build_meta_features, feature_indices, market_probs_from_odds_row, ensure_market_probs
 from src.fixtures import get_current_or_next_matchday_fixtures
-from src.models.meta import blend_probabilities
+from src.models.meta import apply_market_logit_correction, blend_probabilities
 from src.poisson_model import top_k_scorelines_dc
 from src.state_builder import build_league_state, compute_match_components, compute_pre_match_extra_features
 
@@ -20,6 +20,8 @@ def generate_upcoming_matchday_picks(
     mlp_model,
     mlp_cfg,
     *,
+    logreg_model=None,
+    logreg_cfg=None,
     max_window_days=4,
     pick_model="ensemble",
 ):
@@ -68,10 +70,17 @@ def generate_upcoming_matchday_picks(
         mlp_cols = feature_indices(mlp_cfg.get("feature_columns", [])) if mlp_cfg is not None and mlp_cfg.get("feature_columns") else MLP_DEFAULT_COLS
         future_mlp_probs_raw = mlp_model.predict_proba(X_future[:, mlp_cols])
         future_mlp_probs = temperature_scale_probs(future_mlp_probs_raw, float(mlp_cfg["temperature"]))
+        if logreg_model is not None and logreg_cfg is not None:
+            logreg_cols = feature_indices(logreg_cfg.get("feature_columns", [])) if logreg_cfg.get("feature_columns") else list(range(X_future.shape[1]))
+            future_logreg_probs_raw = logreg_model.predict_proba(X_future[:, logreg_cols])
+            future_logreg_probs = temperature_scale_probs(future_logreg_probs_raw, float(logreg_cfg.get("temperature", 1.0)))
+        else:
+            future_logreg_probs = future_mlp_probs
 
         blend_cfg = params.get("_blend_cfg")
         if blend_cfg is None:
             future_ensemble_probs = future_meta_probs
+            future_market_corr_probs = market_fixed
         else:
             future_ensemble_probs = blend_probabilities(
                 blend_cfg["weights"],
@@ -82,10 +91,21 @@ def generate_upcoming_matchday_picks(
                     "mlp": future_mlp_probs,
                 },
             )
+            future_market_corr_probs = apply_market_logit_correction(
+                market_fixed,
+                {
+                    "base": model_probs,
+                    "xgb": future_meta_probs,
+                    "mlp": future_mlp_probs,
+                },
+                blend_cfg.get("market_correction"),
+            )
         candidate_probs = {
             "base": model_probs,
             "market": market_fixed,
+            "market_corr": future_market_corr_probs,
             "meta": future_meta_probs,
+            "logreg": future_logreg_probs,
             "mlp": future_mlp_probs,
             "ensemble": future_ensemble_probs,
         }

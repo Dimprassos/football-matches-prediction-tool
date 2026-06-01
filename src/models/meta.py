@@ -61,6 +61,156 @@ def blend_probabilities(weight_dict, probs_dict):
     return out / row_sums
 
 
+def _normalize_prob_matrix(probs: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    arr = np.asarray(probs, dtype=float)
+    arr = np.nan_to_num(arr, nan=eps, posinf=1.0, neginf=eps)
+    arr = np.clip(arr, eps, 1.0)
+    row_sums = arr.sum(axis=1, keepdims=True)
+    row_sums[~np.isfinite(row_sums) | (row_sums <= 0)] = 1.0
+    return arr / row_sums
+
+
+def market_logit_correction_probs(
+    market_probs: np.ndarray,
+    correction_probs: np.ndarray | None,
+    alpha: float,
+) -> np.ndarray:
+    """
+    Conservative market-aware correction:
+    p = normalize(market ** (1 - alpha) * correction ** alpha)
+
+    alpha=0 returns the market. Small alpha values allow a model to nudge the
+    opening market without replacing it.
+    """
+    market = _normalize_prob_matrix(market_probs)
+    if correction_probs is None or float(alpha) <= 0.0:
+        return market.copy()
+
+    correction = _normalize_prob_matrix(correction_probs)
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    logits = (1.0 - alpha) * np.log(market) + alpha * np.log(correction)
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    exp_logits = np.exp(logits)
+    return exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+
+def apply_market_logit_correction(
+    market_probs: np.ndarray,
+    source_probs: dict[str, np.ndarray],
+    cfg: dict | None,
+) -> np.ndarray:
+    if not cfg:
+        return _normalize_prob_matrix(market_probs)
+    source_model = str(cfg.get("source_model", "market"))
+    if source_model == "market":
+        return _normalize_prob_matrix(market_probs)
+    return market_logit_correction_probs(
+        market_probs,
+        source_probs.get(source_model),
+        float(cfg.get("alpha", 0.0)),
+    )
+
+
+def tune_market_logit_correction(
+    y_late: np.ndarray,
+    market_probs: np.ndarray,
+    candidate_probs: dict[str, np.ndarray | None],
+    *,
+    alpha_grid: list[float] | np.ndarray | None = None,
+    min_improvement: float = 0.0005,
+    fold_masks: list[np.ndarray] | None = None,
+    min_fold_improvement: float = 0.0,
+) -> dict:
+    """
+    Tune a small log-space correction over the market on late validation.
+
+    The gate is deliberately conservative: if no source beats the market by at
+    least `min_improvement`, the correction collapses to the market.
+    """
+    if alpha_grid is None:
+        alpha_grid = [0.0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.75, 1.0]
+
+    market_fixed = _normalize_prob_matrix(market_probs)
+    market_ll = float(log_loss(y_late, market_fixed))
+    best = {
+        "source_model": "market",
+        "alpha": 0.0,
+        "late_val_logloss": market_ll,
+        "late_market_logloss": market_ll,
+        "accepted": False,
+        "min_improvement": float(min_improvement),
+        "min_fold_improvement": float(min_fold_improvement),
+    }
+    source_scores = []
+
+    for name, probs in candidate_probs.items():
+        if probs is None:
+            continue
+        source_ll = float(log_loss(y_late, _normalize_prob_matrix(probs)))
+        source_best = {
+            "source_model": name,
+            "source_logloss": source_ll,
+            "best_alpha": 0.0,
+            "best_logloss": market_ll,
+        }
+        for alpha in alpha_grid:
+            corrected = market_logit_correction_probs(market_fixed, probs, float(alpha))
+            ll = float(log_loss(y_late, corrected))
+            if ll < source_best["best_logloss"]:
+                source_best["best_alpha"] = float(alpha)
+                source_best["best_logloss"] = ll
+            if ll < best["late_val_logloss"]:
+                best.update({
+                    "source_model": name,
+                    "alpha": float(alpha),
+                    "late_val_logloss": ll,
+                    "source_logloss": source_ll,
+                })
+        source_scores.append(source_best)
+
+    best["source_scores"] = source_scores
+    if best["late_val_logloss"] < market_ll - float(min_improvement):
+        corrected = apply_market_logit_correction(market_fixed, candidate_probs, best)
+        fold_checks = []
+        for fold_idx, fold_mask in enumerate(fold_masks or []):
+            fold_mask = np.asarray(fold_mask, dtype=bool)
+            if fold_mask.shape[0] != len(y_late) or not np.any(fold_mask):
+                continue
+            fold_market_ll = float(log_loss(y_late[fold_mask], market_fixed[fold_mask]))
+            fold_corr_ll = float(log_loss(y_late[fold_mask], corrected[fold_mask]))
+            fold_delta = fold_corr_ll - fold_market_ll
+            fold_checks.append({
+                "fold": int(fold_idx),
+                "market_logloss": fold_market_ll,
+                "corrected_logloss": fold_corr_ll,
+                "delta_logloss": fold_delta,
+                "passed": bool(fold_corr_ll <= fold_market_ll - float(min_fold_improvement)),
+            })
+
+        best["fold_checks"] = fold_checks
+        if fold_checks and not all(row["passed"] for row in fold_checks):
+            best.update({
+                "source_model": "market",
+                "alpha": 0.0,
+                "late_val_logloss": market_ll,
+                "accepted": False,
+                "rejection_reason": "failed_chronological_fold_gate",
+            })
+            return best
+
+        best["accepted"] = True
+        return best
+
+    best.update({
+        "source_model": "market",
+        "alpha": 0.0,
+        "late_val_logloss": market_ll,
+        "accepted": False,
+        "rejection_reason": "insufficient_late_validation_improvement",
+    })
+    return best
+
+
 def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
     print("Tuning XGBoost Hyperparameters. Please wait...")
 

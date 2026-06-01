@@ -22,10 +22,27 @@ def build_backtest_config(
     force_refit: bool = False,
     force_retune: bool = False,
     full_report: bool = False,
+    market_odds_source: str = "closing",
+    betting_odds_source: str = "closing",
+    include_market_movement_features: bool | None = None,
 ) -> ExperimentConfig:
     train_cut, test_cut, test_end = season_window(season_start)
+    if include_market_movement_features is None:
+        include_market_movement_features = market_odds_source == "closing"
+    experiment_name = f"season_backtest_{season_start}_{season_start + 1}"
+    if (
+        market_odds_source != "closing"
+        or betting_odds_source != "closing"
+        or not include_market_movement_features
+    ):
+        experiment_name = (
+            f"{experiment_name}_{market_odds_source}_market_"
+            f"{betting_odds_source}_price"
+        )
+        if not include_market_movement_features:
+            experiment_name = f"{experiment_name}_no_move"
     return ExperimentConfig(
-        experiment_name=f"season_backtest_{season_start}_{season_start + 1}",
+        experiment_name=experiment_name,
         train_cut=train_cut,
         test_cut=test_cut,
         test_end=test_end,
@@ -39,6 +56,9 @@ def build_backtest_config(
         generate_upcoming_picks=False,
         print_full_reports=full_report,
         print_parameter_impact=True,
+        market_odds_source=market_odds_source,
+        betting_odds_source=betting_odds_source,
+        include_market_movement_features=include_market_movement_features,
     )
 
 
@@ -68,6 +88,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the old detailed diagnostic tables. By default, detailed tables are written only to artifacts.",
     )
+    parser.add_argument(
+        "--market-odds",
+        choices=["opening", "closing", "legacy"],
+        default="closing",
+        help="Odds snapshot used to build market-implied probabilities/features.",
+    )
+    parser.add_argument(
+        "--betting-odds",
+        choices=["opening", "closing", "legacy"],
+        default="closing",
+        help="Odds snapshot used as the simulated bet price.",
+    )
+    movement_group = parser.add_mutually_exclusive_group()
+    movement_group.add_argument(
+        "--include-market-movement",
+        action="store_true",
+        default=None,
+        help="Use closing minus opening market movement as model features.",
+    )
+    movement_group.add_argument(
+        "--no-market-movement",
+        action="store_false",
+        dest="include_market_movement",
+        help="Zero out closing-movement features for a cleaner pre-match setup.",
+    )
     return parser.parse_args()
 
 
@@ -78,12 +123,18 @@ def main() -> None:
         force_refit=args.force_refit,
         force_retune=args.force_retune,
         full_report=args.full_report,
+        market_odds_source=args.market_odds,
+        betting_odds_source=args.betting_odds,
+        include_market_movement_features=args.include_market_movement,
     )
     print("=== LEAKAGE-SAFE SEASON BACKTEST ===")
     print(f"Target season: {args.season}-{args.season + 1}")
     print(f"Fit history: dates before {config.train_cut}")
     print(f"Validation/meta window: [{config.train_cut}, {config.test_cut})")
     print(f"Test-only betting window: [{config.test_cut}, {config.test_end})")
+    print(f"Market odds snapshot: {config.market_odds_source}")
+    print(f"Betting price snapshot: {config.betting_odds_source}")
+    print(f"Market movement features: {config.include_market_movement_features}")
     print("Match-state and rolling features are recomputed chronologically using only earlier dates.")
     run_training_pipeline(config)
     print("\nBacktest artifacts:")

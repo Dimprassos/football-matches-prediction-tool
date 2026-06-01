@@ -105,3 +105,11 @@ run_ts_utc,experiment_name,model,group_type,group_value,bets,wins,hit_rate,avg_o
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,league_selector,league,germany,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,league_selector,season,2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,league_selector,league_season,germany|2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,league_selector,all,all,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,league_selector,league,germany,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,league_selector,season,2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,league_selector,league_season,germany|2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,league_selector,all,all,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,league_selector,league,germany,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,league_selector,season,2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,league_selector,league_season,germany|2025-2026,170,58,34.1176,3.4926,1.891749,1.954935,0.063187,3.3401

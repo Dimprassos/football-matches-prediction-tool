@@ -1,0 +1,16 @@
+# Runtime dependencies for the football match-result prediction tool.
+# Install into a fresh virtual environment:
+#   python -m venv .venv
+#   .venv\Scripts\activate            (Windows)   |   source .venv/bin/activate  (Linux/macOS)
+#   pip install -r requirements.txt
+# Then launch the tool:
+#   streamlit run app.py
+
+streamlit==1.58.0
+numpy==2.4.4
+pandas==3.0.2
+scikit-learn==1.8.0
+scipy==1.17.1
+xgboost==3.2.0
+joblib==1.5.3
+requests==2.33.1

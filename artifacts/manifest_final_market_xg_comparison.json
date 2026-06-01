@@ -5,6 +5,7 @@
     "artifacts_dir": "artifacts",
     "train_cut": "2024-07-01",
     "test_cut": "2025-07-01",
+    "test_end": null,
     "leagues": [
       "england",
       "spain",
@@ -15,14 +16,16 @@
     "use_cached_artifacts": true,
     "force_retune_leagues": false,
     "force_retune_meta": false,
-    "force_refit_meta_model": false,
+    "force_refit_meta_model": true,
     "force_retune_mlp": false,
-    "force_refit_mlp_model": false,
-    "force_retune_blend": false,
+    "force_refit_mlp_model": true,
+    "force_retune_blend": true,
+    "allow_partial_param_cache": false,
     "random_state": 42,
     "max_upcoming_window_days": 4,
     "detailed_betting_log": false,
-    "print_verbose_audits": false
+    "print_verbose_audits": false,
+    "generate_upcoming_picks": true
   },
   "feature_columns": [
     "model_logit_home",
@@ -1290,19 +1293,19 @@
       "xgb": 0.0,
       "mlp": 0.0
     },
-    "late_val_logloss": 0.9609650874977137,
+    "late_val_logloss": 0.9602779332942968,
     "mlp_allowed": false,
     "mlp_gate": {
-      "late_mlp_logloss": 0.9741203017856326,
-      "late_market_logloss": 0.9609650874977137,
+      "late_mlp_logloss": 0.9757366135841421,
+      "late_market_logloss": 0.9602779332942968,
       "margin_required": 0.002
     }
   },
   "selection_summary": {
     "winner_by_logloss": "market",
     "winner_by_logloss_value": 0.975365,
-    "winner_by_betting_roi": "meta",
-    "winner_by_betting_roi_value": 0.8451,
+    "winner_by_betting_roi": "mlp",
+    "winner_by_betting_roi_value": 2.2724,
     "recommended_probability_model": "market",
     "recommended_betting_model": "meta",
     "recommended_betting_reason": "positive_roi_stable_candidate"

@@ -195,7 +195,11 @@ def write_league_specific_strategy_report(
     min_fold_bets: int = 5,
     min_logloss_improvement_vs_market: float = 0.0,
 ) -> list[dict]:
-    candidate_models = ["meta", "logreg", "mlp"]
+    candidate_models = [
+        model
+        for model in ["market_corr", "meta", "logreg", "mlp"]
+        if model in validation_probs and model in test_probs
+    ]
     selection_rows: list[dict] = []
     selected_test_bets: list[pd.DataFrame] = []
     leagues = sorted({str(row["league"]) for row in validation_match_info})

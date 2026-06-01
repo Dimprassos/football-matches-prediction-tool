@@ -49,3 +49,13 @@ run_ts_utc,experiment_name,league,selected_model,reason,market_val_logloss,selec
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,germany,logreg,positive_roi_and_logloss_in_all_validation_folds,1.057176,1.052315,40,30.0,0.051871,17.5329,170,34.1176,3.4926,0.063187,3.3401
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,italy,market,fallback_to_market,0.931152,0.931152,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
 2026-05-12T15:35:44.548729+00:00,final_market_xg_comparison,spain,market,fallback_to_market,0.930829,0.930829,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,england,market,fallback_to_market,0.943803,0.943803,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,france,market,fallback_to_market,0.956579,0.956579,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,germany,logreg,positive_roi_and_logloss_in_all_validation_folds,1.057176,1.052315,40,30.0,0.051871,17.5329,170,34.1176,3.4926,0.063187,3.3401
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,italy,market,fallback_to_market,0.931152,0.931152,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-12T16:10:28.727880+00:00,final_market_xg_comparison,spain,market,fallback_to_market,0.930829,0.930829,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,england,market,fallback_to_market,0.943803,0.943803,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,france,market,fallback_to_market,0.956579,0.956579,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,germany,logreg,positive_roi_and_logloss_in_all_validation_folds,1.057176,1.052315,40,30.0,0.051871,17.5329,170,34.1176,3.4926,0.063187,3.3401
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,italy,market,fallback_to_market,0.931152,0.931152,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2026-05-20T11:16:03.309715+00:00,final_market_xg_comparison,spain,market,fallback_to_market,0.930829,0.930829,0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0

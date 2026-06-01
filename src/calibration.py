@@ -3,15 +3,12 @@ from typing import Optional
 
 def safe_logit(p: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
-    Proper logit transformation: log(p / (1 - p)).
+    One-vs-rest logit transformation: log(p / (1 - p)).
 
-    Clips p to [eps, 1 - eps] so that both log(p) and log(1-p)
-    are always finite. This is the inverse of the sigmoid function
-    and is the correct transformation to use before temperature scaling.
-
-    Previously this function only computed log(p), which is the
-    log-probability, not the logit. That made temperature_scale_probs
-    perform power-law scaling rather than true temperature scaling.
+    This is useful as a feature transform for individual class
+    probabilities. It is not used for multiclass temperature scaling,
+    because softmax temperature scaling operates on log probabilities
+    when only probabilities, not raw model logits, are available.
     """
     p = np.clip(p, eps, 1.0 - eps)
     return np.log(p) - np.log(1.0 - p)
@@ -23,10 +20,21 @@ def softmax(z: np.ndarray) -> np.ndarray:
 
 def temperature_scale_probs(probs: np.ndarray, T: float) -> np.ndarray:
     """
-    probs: (N,3) raw probabilities
-    Returns calibrated probabilities using temperature scaling on logits.
+    Calibrate multiclass probability vectors with temperature scaling.
+
+    We only have probabilities here, not raw model logits. For a softmax
+    probability vector, log(p) is equivalent to the logits up to an additive
+    constant, so softmax(log(p) / T) gives standard temperature behavior:
+
+    - T = 1 keeps the original probabilities unchanged.
+    - T > 1 softens the distribution.
+    - T < 1 sharpens the distribution.
     """
-    logits = safe_logit(probs)
+    probs = np.asarray(probs, dtype=float)
+    probs = np.nan_to_num(probs, nan=1e-12, posinf=1.0, neginf=1e-12)
+    probs = np.clip(probs, 1e-12, 1.0)
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    logits = np.log(probs)
     scaled = logits / max(T, 1e-6)
     return softmax(scaled)
 

@@ -27,6 +27,9 @@ class ExperimentConfig:
     print_verbose_audits: bool = False
     print_parameter_impact: bool = False
     generate_upcoming_picks: bool = True
+    market_odds_source: str = "closing"
+    betting_odds_source: str = "closing"
+    include_market_movement_features: bool = True
 
     @property
     def params_file(self) -> Path:
@@ -47,6 +50,14 @@ class ExperimentConfig:
     @property
     def mlp_model_file(self) -> Path:
         return self.artifacts_dir / f"mlp_model_{self.experiment_name}.pkl"
+
+    @property
+    def logreg_meta_file(self) -> Path:
+        return self.artifacts_dir / f"best_logreg_{self.experiment_name}.json"
+
+    @property
+    def logreg_model_file(self) -> Path:
+        return self.artifacts_dir / f"logreg_model_{self.experiment_name}.pkl"
 
     @property
     def blend_file(self) -> Path:
@@ -116,4 +127,11 @@ class ExperimentConfig:
 
 
 DEFAULT_CONFIG = ExperimentConfig()
-FINAL_CONFIG = ExperimentConfig(experiment_name="final_market_xg_comparison")
+FINAL_CONFIG = ExperimentConfig(
+    experiment_name="final_opening_market_pre_match",
+    market_odds_source="opening",
+    betting_odds_source="opening",
+    include_market_movement_features=False,
+    allow_partial_param_cache=True,
+)
+CLOSING_MARKET_CONFIG = ExperimentConfig(experiment_name="final_closing_market_xg_comparison")

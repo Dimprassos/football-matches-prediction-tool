@@ -30,7 +30,7 @@ def pick_team(teams, prompt):
 
 def main():
     print("=== Interactive Match Predictor ===")
-    params, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg = load_runtime_artifacts()
+    params, meta_model, meta_cfg, mlp_model, mlp_meta, logreg_model, logreg_meta, blend_cfg = load_runtime_artifacts()
     leagues = ["england", "spain", "italy", "germany", "france"]
 
     while True:
@@ -71,14 +71,30 @@ def main():
                 print("Invalid odds format.")
                 continue
 
-            res = predict_custom_match(home_real, away_real, oh, od, oa, state, meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg)
+            res = predict_custom_match(
+                home_real,
+                away_real,
+                oh,
+                od,
+                oa,
+                state,
+                meta_model,
+                meta_cfg,
+                mlp_model,
+                mlp_meta,
+                blend_cfg,
+                logreg_model=logreg_model,
+                logreg_meta=logreg_meta,
+            )
             print("\n--- Prediction Summary ---")
             print(f"Match: {home_real} vs {away_real}")
             print(f"Elo: {res['elo'][0]:.1f} vs {res['elo'][1]:.1f}")
             print(f"Expected Goals: {res['xg'][0]:.3f} - {res['xg'][1]:.3f}")
             print(f"Base probs     : H={res['base'][0]:.3f} D={res['base'][1]:.3f} A={res['base'][2]:.3f}")
             print(f"Market probs   : H={res['market'][0]:.3f} D={res['market'][1]:.3f} A={res['market'][2]:.3f}")
+            print(f"MktCorr probs  : H={res['market_corr'][0]:.3f} D={res['market_corr'][1]:.3f} A={res['market_corr'][2]:.3f}")
             print(f"XGBoost probs  : H={res['meta'][0]:.3f} D={res['meta'][1]:.3f} A={res['meta'][2]:.3f}")
+            print(f"LogReg probs   : H={res['logreg'][0]:.3f} D={res['logreg'][1]:.3f} A={res['logreg'][2]:.3f}")
             print(f"MLP probs      : H={res['mlp'][0]:.3f} D={res['mlp'][1]:.3f} A={res['mlp'][2]:.3f}")
             print(f"Ensemble probs : H={res['ensemble'][0]:.3f} D={res['ensemble'][1]:.3f} A={res['ensemble'][2]:.3f}")
             pick = ["H", "D", "A"][int(np.argmax(res['ensemble']))]

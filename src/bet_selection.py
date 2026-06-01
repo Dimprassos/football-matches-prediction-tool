@@ -11,7 +11,7 @@ from src.artifact_store import append_rows_to_csv
 from src.config import ExperimentConfig
 from src.evaluation import betting_records
 from src.feature_builder import FEATURE_COLUMNS
-from src.metrics import multiclass_brier, top_label_ece
+from src.metrics import class_metric_summary, multiclass_brier, top_label_ece
 
 
 EDGE_THRESHOLDS = (0.0, 0.025, 0.05, 0.075, 0.10, 0.125, 0.15, 0.20)
@@ -257,6 +257,7 @@ def write_probability_quality_report(
         y_true = split_y[split]
         for model, probs in probs_by_model.items():
             pred = np.argmax(probs, axis=1)
+            class_metrics = class_metric_summary(probs, y_true)
             rows.append({
                 "run_ts_utc": run_ts,
                 "experiment_name": config.experiment_name,
@@ -267,6 +268,16 @@ def write_probability_quality_report(
                 "brier": round(float(multiclass_brier(probs, y_true)), 6),
                 "ece": round(float(top_label_ece(probs, y_true)), 6),
                 "accuracy": round(float((pred == y_true).mean()), 6),
+                "macro_f1": round(class_metrics["macro_f1"], 6),
+                "home_precision": round(class_metrics["home_precision"], 6),
+                "home_recall": round(class_metrics["home_recall"], 6),
+                "home_f1": round(class_metrics["home_f1"], 6),
+                "draw_precision": round(class_metrics["draw_precision"], 6),
+                "draw_recall": round(class_metrics["draw_recall"], 6),
+                "draw_f1": round(class_metrics["draw_f1"], 6),
+                "away_precision": round(class_metrics["away_precision"], 6),
+                "away_recall": round(class_metrics["away_recall"], 6),
+                "away_f1": round(class_metrics["away_f1"], 6),
                 "avg_confidence": round(float(np.max(probs, axis=1).mean()), 6),
                 "draw_pick_rate": round(float((pred == 1).mean()), 6),
             })
