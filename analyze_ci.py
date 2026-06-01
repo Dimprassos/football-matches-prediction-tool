@@ -28,6 +28,10 @@ SEASONS = {
 }
 ARTIFACTS = "artifacts"
 EDGE_THRESHOLD = 0.05  # matches the pipeline default
+# Minimum number of placed bets before an ROI bootstrap CI is allowed to count
+# as "significant". Guards against degenerate small samples (e.g. 4 bets that
+# all lose give a [-100, -100] CI that spuriously excludes 0).
+MIN_BETS_FOR_ROI_SIG = 50
 
 
 def model_names(df: pd.DataFrame) -> list[str]:
@@ -103,7 +107,7 @@ def analyze_season(name: str, exp: str, n_boot: int, rng: np.random.Generator):
             ssum = s_boot.sum(axis=1)
             roi_boot = np.where(ssum > 0, p_boot.sum(axis=1) / np.where(ssum > 0, ssum, 1) * 100.0, 0.0)
             r_lo, r_hi = ci(roi_boot)
-            r_sig = "*" if (r_lo > 0 or r_hi < 0) else ""
+            r_sig = "*" if (n_bets >= MIN_BETS_FOR_ROI_SIG and (r_lo > 0 or r_hi < 0)) else ""
             finite_clv = clv[np.isfinite(clv)]
             clv_mean = float(finite_clv.mean()) * 100.0 if finite_clv.size else float("nan")
         else:
@@ -116,7 +120,8 @@ def analyze_season(name: str, exp: str, n_boot: int, rng: np.random.Generator):
               f"{roi:>+8.2f}{('[%+.1f, %+.1f]' % (r_lo, r_hi)):>20}{r_sig:>5}"
               f"{n_bets:>6}{clv_mean:>7.2f}")
 
-    print("  d_vs_mkt < 0 means lower log loss than the market. '*' = bootstrap 95% CI excludes 0.")
+    print(f"  d_vs_mkt < 0 means lower log loss than the market. '*' = bootstrap 95% CI excludes 0 "
+          f"(ROI '*' also requires >= {MIN_BETS_FOR_ROI_SIG} bets).")
 
 
 def main():
