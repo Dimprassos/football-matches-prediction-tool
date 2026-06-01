@@ -205,6 +205,11 @@ def load_league_data(league_name):
             )
 
         df = df.dropna(subset=["date"])
+        if df.empty:
+            # An empty CSV (e.g. a fixtures file once the season is over and there
+            # are no upcoming matches) would otherwise break the result_type="expand"
+            # odds apply below, which cannot infer three columns from zero rows.
+            continue
 
         # keep played + future fixtures
         df["home_goals"] = pd.to_numeric(df["home_goals"], errors="coerce")
