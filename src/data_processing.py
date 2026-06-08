@@ -1,3 +1,12 @@
+"""Load and clean the raw football-data CSVs into the project's canonical schema.
+
+:func:`load_league_data` reads every CSV for a league (historical results and
+upcoming fixtures), normalises team names and dates, derives clean odds (closing,
+opening, and a cross-bookmaker average computed in fair-probability space) plus
+over/under and Asian-handicap signals, renames match stats, and finally merges in
+Understat xG and external (lineup/injury/weather) context. The many ``_pick_*``
+helpers encapsulate the bookmaker-column fallback logic.
+"""
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -37,6 +46,7 @@ REQUIRED_BASE = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
 
 
 def _valid_odds_triplet(oh, od, oa):
+    """True if all three decimal odds are finite and greater than 1.0."""
     if not (np.isfinite(oh) and np.isfinite(od) and np.isfinite(oa)):
         return False
     if oh <= 1.0001 or od <= 1.0001 or oa <= 1.0001:
@@ -45,6 +55,7 @@ def _valid_odds_triplet(oh, od, oa):
 
 
 def _odds_to_fair_probs(oh, od, oa):
+    """Decimal 1/X/2 odds -> overround-removed (fair) probabilities."""
     inv = np.array([1.0 / oh, 1.0 / od, 1.0 / oa], dtype=float)
     s = inv.sum()
     if s <= 0 or not np.isfinite(s):
@@ -53,6 +64,7 @@ def _odds_to_fair_probs(oh, od, oa):
 
 
 def _fair_probs_to_odds(p):
+    """Inverse of :func:`_odds_to_fair_probs`: fair probabilities -> decimal odds."""
     p = np.asarray(p, dtype=float)
     if p.shape != (3,) or not np.isfinite(p).all():
         return (np.nan, np.nan, np.nan)
@@ -64,6 +76,11 @@ def _fair_probs_to_odds(p):
 
 
 def _pick_best_or_avg_odds_row(row, available_cols):
+    """Best available 1/X/2 odds for a row: Pinnacle closing, else cross-book average.
+
+    Prefers the Pinnacle closing triplet; otherwise averages every available
+    bookmaker in fair-probability space and converts back to odds. NaNs if none valid.
+    """
     # 1) Pinnacle closing
     if all(c in available_cols for c in CLOSING_COLS):
         oh = pd.to_numeric(row.get(CLOSING_COLS[0]), errors="coerce")
@@ -92,6 +109,11 @@ def _pick_best_or_avg_odds_row(row, available_cols):
 
 
 def _pick_triplet(row, available_cols, preferred_cols, fallback_book_triples=()):
+    """Pick a 1/X/2 odds triplet from preferred columns, falling back to a book average.
+
+    Used for the opening (market average) and closing odds families; returns NaNs
+    when neither the preferred columns nor any fallback book are usable.
+    """
     if all(c in available_cols for c in preferred_cols):
         oh = pd.to_numeric(row.get(preferred_cols[0]), errors="coerce")
         od = pd.to_numeric(row.get(preferred_cols[1]), errors="coerce")
@@ -114,6 +136,7 @@ def _pick_triplet(row, available_cols, preferred_cols, fallback_book_triples=())
 
 
 def _pick_over_under_25(row, available_cols):
+    """Fair probability of over 2.5 goals from the first usable over/under odds pair."""
     for over_col, under_col in OVER_UNDER_COLS:
         if over_col in available_cols and under_col in available_cols:
             over = pd.to_numeric(row.get(over_col), errors="coerce")
@@ -127,6 +150,7 @@ def _pick_over_under_25(row, available_cols):
 
 
 def _pick_over_under_25_odds(row, available_cols):
+    """Raw (over, under) 2.5-goals decimal odds from the first usable pair."""
     for over_col, under_col in OVER_UNDER_COLS:
         if over_col in available_cols and under_col in available_cols:
             over = pd.to_numeric(row.get(over_col), errors="coerce")
@@ -137,6 +161,7 @@ def _pick_over_under_25_odds(row, available_cols):
 
 
 def _pick_ah_line(row, available_cols):
+    """The Asian-handicap line for the row from the first available AH column."""
     for col in AH_LINE_COLS:
         if col in available_cols:
             value = pd.to_numeric(row.get(col), errors="coerce")
@@ -146,6 +171,14 @@ def _pick_ah_line(row, available_cols):
 
 
 def load_league_data(league_name):
+    """Load, clean, and enrich all CSVs for a league into one canonical DataFrame.
+
+    Concatenates every CSV under ``data/raw/<league>`` (results + fixtures),
+    normalises names/dates, marks played vs upcoming via ``is_played``, derives the
+    odds/over-under/AH columns, deduplicates overlapping fixture rows, and merges in
+    Understat xG and external context. This is the single entry point every consumer
+    (training, app, predictor) uses to obtain match data.
+    """
     data_path = PROJECT_ROOT / "data" / "raw" / league_name
     files = list(data_path.glob("*.csv"))
 

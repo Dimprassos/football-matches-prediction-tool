@@ -1,3 +1,8 @@
+"""Diagnostic: print Understat xG coverage per league (matched %, unmatched teams).
+
+Run with ``python -m src.diagnose_understat`` to check how well the local Understat
+export joins onto each league's played fixtures.
+"""
 from __future__ import annotations
 
 from src.config import DEFAULT_CONFIG
@@ -6,6 +11,7 @@ from src.understat_data import understat_coverage_report
 
 
 def main():
+    """Print the Understat match-coverage summary for every configured league."""
     print("=== UNDERSTAT COVERAGE REPORT ===")
     for league in DEFAULT_CONFIG.leagues:
         df = load_league_data(league)

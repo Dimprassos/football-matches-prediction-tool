@@ -1,3 +1,20 @@
+"""Learned meta-models, the ensemble blend, and the market-logit correction.
+
+On top of the base (Elo + Dixon-Coles) model this module provides the learned
+layers and the ways they are combined:
+
+* **XGBoost / MLP / Logistic Regression** meta-models, each with its own
+  hyper-parameter tuning, fitting, and validation-locked feature-subset selection.
+* **Ensemble blend** (:func:`blend_probabilities` / :func:`tune_blend_weights`):
+  a convex combination of the base/market/xgb/mlp probabilities whose weights are
+  grid-searched on late validation.
+* **Market-logit correction** (:func:`market_logit_correction_probs`): a
+  conservative, log-space nudge of the opening market by a model, gated so it can
+  only be accepted if it beats the market by a margin on late validation.
+
+All tuning is done on a *late* slice of the training data (held-out validation),
+never on the test set, so reported metrics are leakage-safe.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -19,6 +36,11 @@ if optuna is not None:
 
 
 def make_mlp_pipeline(best_mlp_cfg):
+    """Build a StandardScaler + MLPClassifier pipeline from a tuned config dict.
+
+    Uses early stopping on an internal validation fraction so the network does not
+    overfit; the scaler is required because the raw features are on very different scales.
+    """
     return make_pipeline(
         StandardScaler(),
         MLPClassifier(
@@ -38,6 +60,11 @@ def make_mlp_pipeline(best_mlp_cfg):
 
 
 def probs_from_meta_features(X_meta, start_idx):
+    """Recover a normalised 1/X/2 probability matrix from 3 logit columns.
+
+    The feature matrix stores each model's contribution as logits; this applies a
+    sigmoid to the three columns starting at ``start_idx`` and renormalises to sum to 1.
+    """
     logits = X_meta[:, start_idx:start_idx + 3]
     probs = 1.0 / (1.0 + np.exp(-logits))
     row_sums = probs.sum(axis=1, keepdims=True)
@@ -46,6 +73,12 @@ def probs_from_meta_features(X_meta, start_idx):
 
 
 def blend_probabilities(weight_dict, probs_dict):
+    """Weighted average of available probability matrices, renormalised per row.
+
+    Only keys present (and non-None) in ``probs_dict`` contribute; weights are
+    normalised by their realised total. If the total weight is zero, falls back to
+    the XGBoost probabilities.
+    """
     out = np.zeros_like(probs_dict["base"], dtype=float)
     total_w = 0.0
     for key, w in weight_dict.items():
@@ -62,6 +95,7 @@ def blend_probabilities(weight_dict, probs_dict):
 
 
 def _normalize_prob_matrix(probs: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Sanitise a probability matrix: replace NaN/inf, clip to [eps, 1], renormalise rows."""
     arr = np.asarray(probs, dtype=float)
     arr = np.nan_to_num(arr, nan=eps, posinf=1.0, neginf=eps)
     arr = np.clip(arr, eps, 1.0)
@@ -99,6 +133,11 @@ def apply_market_logit_correction(
     source_probs: dict[str, np.ndarray],
     cfg: dict | None,
 ) -> np.ndarray:
+    """Apply a tuned correction config to the market probabilities at serve/eval time.
+
+    ``cfg`` (from :func:`tune_market_logit_correction`) names the source model and
+    ``alpha``. If the config is empty or selects "market", the market is returned unchanged.
+    """
     if not cfg:
         return _normalize_prob_matrix(market_probs)
     source_model = str(cfg.get("source_model", "market"))
@@ -212,6 +251,11 @@ def tune_market_logit_correction(
 
 
 def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
+    """Tune XGBoost (learning_rate, max_depth, n_estimators) by late-validation log loss.
+
+    Fits on the early slice and scores on the late slice. Uses Optuna when available,
+    otherwise falls back to a deterministic grid search. Returns the best config dict.
+    """
     print("Tuning XGBoost Hyperparameters. Please wait...")
 
     def score_cfg(lr, md, ne):
@@ -249,6 +293,7 @@ def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
 
 
 def fit_xgb_model(X_train, y_train, cfg):
+    """Fit the final XGBoost classifier on the full training data using a tuned config."""
     model = XGBClassifier(
         n_estimators=int(cfg["n_estimators"]),
         learning_rate=float(cfg["learning_rate"]),
@@ -263,6 +308,7 @@ def fit_xgb_model(X_train, y_train, cfg):
 
 
 def make_logreg_pipeline(C: float = 1.0):
+    """Build a StandardScaler + multinomial LogisticRegression pipeline (the simple baseline)."""
     return make_pipeline(
         StandardScaler(),
         LogisticRegression(
@@ -275,6 +321,7 @@ def make_logreg_pipeline(C: float = 1.0):
 
 
 def tune_logreg_hyperparams(X_early, y_early, X_late, y_late):
+    """Tune the LogReg regularisation ``C`` (with temperature calibration) by late log loss."""
     print("Tuning Logistic Regression baseline...")
     best = None
     for C in [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0]:
@@ -290,6 +337,13 @@ def tune_logreg_hyperparams(X_early, y_early, X_late, y_late):
 
 
 def tune_feature_subset(model_factory, X_early, y_early, X_late, y_late, candidate_feature_sets, *, temperature_scale=False):
+    """Pick the feature subset (by column indices) with the best late-validation log loss.
+
+    For each named candidate subset, fits a fresh model (from ``model_factory``) on
+    those columns and scores it on late validation. This is where the canonical XGB
+    ends up market-only — the market subset simply scores best. Returns
+    ``(best_row, all_rows)``.
+    """
     best = None
     rows = []
     for name, cols in candidate_feature_sets.items():
@@ -316,6 +370,11 @@ def tune_feature_subset(model_factory, X_early, y_early, X_late, y_late, candida
 
 
 def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
+    """Tune MLP architecture/regularisation (with temperature calibration) by late log loss.
+
+    Searches 1-2 hidden layers, layer widths, ``alpha`` and initial learning rate.
+    Uses Optuna when available, else a grid fallback. Returns the best config dict.
+    """
     print("Tuning MLP Hyperparameters. Please wait...")
 
     def score_cfg(cfg):
@@ -366,6 +425,7 @@ def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
 
 
 def tune_mlp_feature_subset(X_early, y_early, X_late, y_late, base_cfg, candidate_feature_sets):
+    """Select the MLP feature subset with the best late-validation log loss (temperature-scaled)."""
     print("Selecting MLP feature subset on late validation...")
     best = None
     rows = []
@@ -393,6 +453,12 @@ def tune_mlp_feature_subset(X_early, y_early, X_late, y_late, base_cfg, candidat
 
 
 def tune_blend_weights(y_late, probs_base, probs_market, probs_xgb, probs_mlp, step=0.1):
+    """Exhaustively grid-search ensemble blend weights over the available models.
+
+    Recursively tries every weight combination (on a ``step`` grid) for the
+    non-None probability sources and keeps the one with the lowest late-validation
+    log loss. Returns ``{"weights": {...}, "late_val_logloss": ...}``.
+    """
     weight_grid = np.arange(0.0, 1.0 + 1e-9, step)
     best = None
     print("Tuning blend weights on late validation. Please wait...")

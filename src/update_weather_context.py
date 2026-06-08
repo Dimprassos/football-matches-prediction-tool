@@ -1,3 +1,10 @@
+"""Fetch Open-Meteo weather context for fixtures and write it to match_context.csv.
+
+Looks up temperature/wind/precipitation at each venue around kickoff and merges the
+weather columns into the external match-context file consumed by
+:mod:`src.external_context`. Optional (needs network); the pipeline runs without it.
+Run with ``python src/update_weather_context.py``.
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,12 +1,20 @@
+"""Elo rating computation with margin-of-victory scaling and dynamic team entry.
+
+Provides the building blocks (expected score, match result, margin multiplier) and
+a one-pass :func:`compute_elo_ratings` that returns the pre-match ratings for every
+fixture in chronological order — the form of Elo used as a base-model feature.
+"""
 import pandas as pd
 from typing import Dict, List, Tuple
 
 
 def expected_score(r_home, r_away):
+    """Logistic Elo win expectation for the home side given both ratings."""
     return 1 / (1 + 10 ** ((r_away - r_home) / 400))
 
 
 def match_result(home_goals: int, away_goals: int) -> Tuple[float, float]:
+    """Map a final score to Elo scores: (1,0) home win, (0,1) away win, (0.5,0.5) draw."""
     if home_goals > away_goals:
         return 1.0, 0.0
     if home_goals < away_goals:
@@ -15,6 +23,7 @@ def match_result(home_goals: int, away_goals: int) -> Tuple[float, float]:
 
 
 def margin_multiplier(goal_diff: int) -> float:
+    """Scale the Elo update by margin of victory (bigger wins move ratings more)."""
     d = abs(int(goal_diff))
     if d <= 1:
         return 1.0

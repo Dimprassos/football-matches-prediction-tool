@@ -1,3 +1,9 @@
+"""Probability-quality and classification metrics for the 3-class (1/X/2) problem.
+
+Provides the multiclass Brier score, top-label Expected Calibration Error (ECE),
+and per-class precision/recall/F1 with a macro-F1 summary. Log loss itself comes
+from scikit-learn; these complement it with calibration and class-balance views.
+"""
 import numpy as np
 
 
@@ -45,6 +51,7 @@ def top_label_ece(probs: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
 
 
 def class_metric_summary(probs: np.ndarray, y: np.ndarray) -> dict[str, float]:
+    """Per-class precision/recall/F1 (home/draw/away) plus macro-F1, as a flat dict."""
     pred = np.argmax(probs, axis=1)
     out: dict[str, float] = {}
     f1_values = []

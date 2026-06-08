@@ -1,3 +1,9 @@
+"""Build thesis-ready markdown/CSV summaries from the saved experiment artifacts.
+
+Reads the ``final_*`` report CSVs for an experiment and renders consolidated tables
+(model metrics, calibration, betting ROI, per-league breakdowns) in the format used
+directly in the written thesis. Run with ``python -m src.thesis_report``.
+"""
 from __future__ import annotations
 
 import argparse

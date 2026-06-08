@@ -1,3 +1,10 @@
+"""Download/refresh the raw football-data.co.uk league CSVs (results + fixtures).
+
+Fetches the current-season result and fixture files for each configured league and
+writes them under ``data/raw/<league>``. Optional utility — the repo already ships
+with data, so this is only needed to pull newer matches. Run with
+``python src/update_data.py``.
+"""
 import os
 import re
 from io import BytesIO

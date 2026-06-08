@@ -1,3 +1,10 @@
+"""Generate predictions for the current/next matchday's unplayed fixtures.
+
+Mirrors the runtime prediction path but in batch: for each league it builds the
+league state, finds the upcoming fixtures, reconstructs their pre-match features,
+and prints/returns the chosen model's picks. Invoked at the end of training when
+``generate_upcoming_picks`` is enabled.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -25,6 +32,12 @@ def generate_upcoming_matchday_picks(
     max_window_days=4,
     pick_model="ensemble",
 ):
+    """Predict and print the upcoming matchday's fixtures for every league.
+
+    Uses the already-trained per-league params and models. Returns the collected
+    pick rows; ``pick_model`` selects which model's probabilities are shown as the
+    headline pick.
+    """
     print("\n" + "=" * 70)
     print(f"=== CURRENT / NEXT MATCHDAY PICKS ({pick_model.upper()}) ===")
     print("=" * 70)

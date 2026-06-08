@@ -1,3 +1,11 @@
+"""Betting simulation and diagnostic audits used to evaluate models economically.
+
+A model is only useful here if it can beat the market, so this module turns
+probabilities + odds into realistic betting outcomes: :func:`simulate_value_betting`
+runs a fractional-Kelly value-betting simulation, :func:`betting_records` returns the
+per-bet ledger (reused for bootstrap CIs and ROI), and the ``print_*`` functions are
+console audits (market dependency, strategy comparison, profit profile, alignment).
+"""
 import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss
@@ -130,6 +138,12 @@ def betting_records(
     max_odds=10.0,
     max_ev=1.0,
 ):
+    """Return the per-bet ledger (one row per placed value bet) under the same rules.
+
+    Same value-betting/fractional-Kelly logic as :func:`simulate_value_betting`, but
+    instead of printing a summary it returns the individual bet records (stake, odds,
+    outcome, profit, CLV...). This is the reusable source for ROI and bootstrap CIs.
+    """
     rows = []
     for i in range(len(probs)):
         p_h, p_d, p_a = probs[i]
@@ -202,6 +216,7 @@ def betting_records(
 
 
 def print_alignment_audit(probs, raw_odds, y_true, match_info, title="ALIGNMENT AUDIT", n=20):
+    """Print a sample of matches showing model probs vs odds vs outcome (sanity check)."""
     print("\n" + "=" * 70)
     print(f"=== {title} ===")
     print("=" * 70)
@@ -239,6 +254,7 @@ def print_alignment_audit(probs, raw_odds, y_true, match_info, title="ALIGNMENT 
 
 
 def print_strategy_comparison(strategy_probs, raw_odds, y_true, edge_threshold=0.05):
+    """Compare betting ROI across models/strategies side by side."""
     print("\n" + "=" * 70)
     print("=== BETTING STRATEGY COMPARISON ===")
     print("=" * 70)
@@ -268,6 +284,7 @@ def print_strategy_comparison(strategy_probs, raw_odds, y_true, edge_threshold=0
 
 
 def print_market_dependency_audit(y_true, p_base, p_market, p_meta, p_mlp, p_ens):
+    """Audit how far each model's probabilities deviate from the market (and whether it helps)."""
     print("\n" + "=" * 70)
     print("=== MARKET DEPENDENCY AUDIT ===")
     print("=" * 70)
@@ -308,6 +325,7 @@ def print_market_dependency_audit(y_true, p_base, p_market, p_meta, p_mlp, p_ens
 
 
 def print_profit_profile_audit(probs, raw_odds, y_true, match_info, edge_threshold=0.05):
+    """Break down betting profit by odds band / edge to expose where returns come from."""
     print("\n" + "=" * 70)
     print("=== PROFIT PROFILE AUDIT ===")
     print("=" * 70)

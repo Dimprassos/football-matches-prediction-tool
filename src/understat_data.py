@@ -1,3 +1,11 @@
+"""Merge Understat expected-goals (xG/npxG/xpts) data into the league fixtures.
+
+Reads a local Understat export, harmonises its league/team names and dates to the
+project's canonical schema, and joins per-team xG metrics onto each match (with a
+small near-date tolerance to absorb kickoff-date mismatches). :func:`add_understat_xg`
+is the public entry point used by :func:`data_processing.load_league_data`;
+:func:`understat_coverage_report` summarises how many matches were matched.
+"""
 from __future__ import annotations
 
 import re
@@ -114,6 +122,11 @@ UNDERSTAT_VALUE_COLUMNS = [
 
 
 def normalize_team_name(name) -> str:
+    """Aggressively normalise an Understat team name to a join key.
+
+    Lowercases, strips club suffixes (FC/CF/AC...) and punctuation, collapses
+    whitespace, and applies ``TEAM_ALIASES`` so Understat names line up with ours.
+    """
     if not isinstance(name, str):
         return ""
     text = name.lower()
@@ -125,10 +138,12 @@ def normalize_team_name(name) -> str:
 
 
 def _normalise_date(series: pd.Series) -> pd.Series:
+    """Parse to midnight-normalised datetimes (NaT on failure)."""
     return pd.to_datetime(series, errors="coerce").dt.normalize()
 
 
 def _filter_league(df: pd.DataFrame, league_name: str) -> pd.DataFrame:
+    """Keep only the rows whose ``league`` matches the league's known aliases."""
     if "league" not in df.columns:
         return df
     aliases = LEAGUE_ALIASES.get(league_name, {league_name})
@@ -137,6 +152,7 @@ def _filter_league(df: pd.DataFrame, league_name: str) -> pd.DataFrame:
 
 
 def _first_existing(columns, candidates):
+    """Return the first candidate column name present in ``columns`` (or None)."""
     for candidate in candidates:
         if candidate in columns:
             return candidate
@@ -144,6 +160,11 @@ def _first_existing(columns, candidates):
 
 
 def _from_match_rows(raw: pd.DataFrame, league_name: str) -> pd.DataFrame | None:
+    """Build the per-match xG table when the export has one row per match (home+away cols).
+
+    Returns None if the file isn't in this shape so the caller can try the
+    one-row-per-team layout instead.
+    """
     columns = set(raw.columns)
     date_col = _first_existing(columns, ["date", "Date"])
     home_col = _first_existing(columns, ["team_h", "home_team", "home", "h_team"])
@@ -175,6 +196,11 @@ def _from_match_rows(raw: pd.DataFrame, league_name: str) -> pd.DataFrame | None
 
 
 def _from_team_rows(raw: pd.DataFrame, league_name: str) -> pd.DataFrame | None:
+    """Build the per-match xG table from a one-row-per-team export by pairing rows.
+
+    Pairs each date's home/away team rows into a single match record. Returns None
+    if the file isn't in this shape.
+    """
     columns = set(raw.columns)
     date_col = _first_existing(columns, ["date", "Date"])
     team_col = _first_existing(columns, ["club_name", "team", "Team", "team_name"])
@@ -241,6 +267,11 @@ def _from_team_rows(raw: pd.DataFrame, league_name: str) -> pd.DataFrame | None:
 
 
 def _fill_near_date_matches(merged: pd.DataFrame, understat: pd.DataFrame, max_days: int = 2) -> pd.DataFrame:
+    """Fill still-unmatched rows by matching on teams within +/- ``max_days``.
+
+    Kickoff dates sometimes differ by a day between feeds; this second pass recovers
+    those matches without allowing far-apart (wrong) joins.
+    """
     if merged.empty or understat.empty:
         return merged
 
@@ -270,6 +301,13 @@ def _fill_near_date_matches(merged: pd.DataFrame, understat: pd.DataFrame, max_d
 
 
 def add_understat_xg(df: pd.DataFrame, league_name: str, path: Path = UNDERSTAT_MATCHES_FILE) -> pd.DataFrame:
+    """Left-join Understat xG/npxG/xpts columns onto the league fixtures.
+
+    Adds the :data:`UNDERSTAT_VALUE_COLUMNS` (NaN where unmatched), merging on
+    normalised (date, home, away) keys plus a near-date fallback. xG is cleared for
+    unplayed fixtures. Returns the input unchanged (all-NaN columns) if the export
+    is missing or unusable, so the pipeline still runs offline.
+    """
     out = df.copy()
     for col in UNDERSTAT_VALUE_COLUMNS:
         out[col] = np.nan
@@ -313,6 +351,7 @@ def add_understat_xg(df: pd.DataFrame, league_name: str, path: Path = UNDERSTAT_
 
 
 def load_understat_matches_for_league(league_name: str, path: Path = UNDERSTAT_MATCHES_FILE) -> pd.DataFrame:
+    """Load the normalised, deduplicated Understat match table for one league (empty if none)."""
     if not path.exists():
         return pd.DataFrame()
     raw = pd.read_csv(path)
@@ -325,6 +364,7 @@ def load_understat_matches_for_league(league_name: str, path: Path = UNDERSTAT_M
 
 
 def understat_coverage_report(fixtures_df: pd.DataFrame, league_name: str, path: Path = UNDERSTAT_MATCHES_FILE) -> dict:
+    """Report how many played fixtures got Understat data (counts, coverage %, unmatched teams)."""
     played = fixtures_df[fixtures_df["is_played"] == True].copy()
     if played.empty:
         return {"league": league_name, "played": 0, "matched": 0, "coverage": 0.0, "unmatched_teams": []}

@@ -1,3 +1,11 @@
+"""Merge optional external match context (lineups, injuries, weather) into fixtures.
+
+Reads ``data/external/match_context.csv`` (produced by the API-Football / weather
+updaters) and joins its lineup-strength, absence/injury/suspension counts, and
+weather columns onto each match. When the file is absent every context column is
+filled with neutral defaults via :func:`_empty_context`, so the pipeline runs fully
+offline — this is the seam the "no API access" limitation lives behind.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -43,6 +51,7 @@ LEAGUE_ALIASES = {
 
 
 def _empty_context(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with neutral context columns added (0 for *_available flags, NaN else)."""
     out = df.copy()
     for col in EXTERNAL_CONTEXT_VALUE_COLUMNS:
         if col not in out.columns:
@@ -114,6 +123,7 @@ def _parse_match_dates(values: pd.Series) -> pd.Series:
 
 
 def _normalize_match_context(raw: pd.DataFrame, league_name: str) -> pd.DataFrame:
+    """Harmonise a raw match-context export into the canonical (date, teams, context) schema."""
     date_col = _pick_col(raw, ("date", "match_date", "utc_date"))
     home_col = _pick_col(raw, ("home_team", "hometeam", "team_h", "home"))
     away_col = _pick_col(raw, ("away_team", "awayteam", "team_a", "away"))
@@ -189,6 +199,7 @@ def add_external_match_context(
     league_name: str,
     path: Path = MATCH_CONTEXT_FILE,
 ) -> pd.DataFrame:
+    """Left-join lineup/injury/weather context onto fixtures (neutral defaults if file absent)."""
     out = _empty_context(df)
     if not path.exists():
         return out

@@ -11,7 +11,7 @@ import pandas as pd
 from src.artifact_store import append_rows_to_csv
 import src.update_api_football_context as api_football_context
 import src.data_processing as data_processing
-from update_team_news import _backtest_window
+from scripts.update_team_news import _backtest_window
 from src.cli.backtest_season_cli import build_backtest_config, season_window
 from src.calibration import temperature_scale_probs
 from src.config import ExperimentConfig
@@ -939,6 +939,47 @@ class RollingFeatureTests(unittest.TestCase):
         self.assertEqual(float(merged.loc[0, "away_suspension_count"]), 1.0)
         self.assertEqual(float(merged.loc[0, "home_manager_change_recent"]), 1.0)
         self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 18.5)
+
+
+class RuntimePredictorFeatureTests(unittest.TestCase):
+    def test_runtime_extra_features_reconstruct_understat_from_history(self):
+        from types import SimpleNamespace
+
+        from src.predictor import build_runtime_extra_features
+
+        past = pd.DataFrame([{
+            "date": pd.Timestamp("2024-01-01"),
+            "home_team": "A",
+            "away_team": "B",
+            "home_goals": 2,
+            "away_goals": 1,
+            "home_understat_xg": 1.7,
+            "away_understat_xg": 0.8,
+            "home_understat_npxg": 1.4,
+            "away_understat_npxg": 0.7,
+            "home_understat_xpts": 2.1,
+            "away_understat_xpts": 0.6,
+        }])
+        state = SimpleNamespace(played_df=past)
+
+        extra = build_runtime_extra_features("A", "B", state)
+
+        self.assertEqual(len(extra), EXTRA_AUX_LEN)
+        offset = 6 + 12
+        xg_home = extra[feature_indices(["understat_xg_for_home_5"])[0] - offset]
+        xg_away = extra[feature_indices(["understat_xg_for_away_5"])[0] - offset]
+        self.assertAlmostEqual(float(xg_home), 1.7)
+        self.assertAlmostEqual(float(xg_away), 0.8)
+
+    def test_runtime_extra_features_fall_back_to_neutral_without_history(self):
+        from types import SimpleNamespace
+
+        from src.predictor import build_runtime_extra_features
+        from src.state_builder import neutral_extra_features
+
+        for played in (None, pd.DataFrame()):
+            extra = build_runtime_extra_features("A", "B", SimpleNamespace(played_df=played))
+            np.testing.assert_allclose(extra, neutral_extra_features())
 
 
 if __name__ == "__main__":

@@ -1,3 +1,20 @@
+"""Experiment configuration and the canonical experiment presets.
+
+Every run of the pipeline (training, backtests, the Streamlit app) is driven by an
+:class:`ExperimentConfig`. The config decides the train/test split, which cached
+artifacts may be reused, where artifacts are written (all paths are derived from
+``experiment_name``), and the modelling knobs (odds source, market-movement
+features, forced feature sets).
+
+The pre-built configs at the bottom of the module are the ones the project ships
+with:
+
+* ``FINAL_CONFIG`` — the canonical, market-dominated experiment whose metrics the
+  thesis reports (this is what the app serves by default).
+* ``CONTEXT_AWARE_CONFIG`` — a feature-rich variant forced to use understat/form
+  features, for comparison against the market-only model.
+* ``DEFAULT_CONFIG`` / ``CLOSING_MARKET_CONFIG`` — older baseline setups.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -6,6 +23,23 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class ExperimentConfig:
+    """Immutable settings for a single experiment.
+
+    Field groups:
+
+    * **Data window** — ``train_cut``/``test_cut``/``test_end`` define the fixed,
+      date-based split; ``leagues`` selects which leagues are loaded.
+    * **Caching / force flags** — ``use_cached_artifacts`` plus the ``force_*``
+      switches control whether the expensive Optuna tuning and model fits are
+      reused or redone. ``allow_partial_param_cache`` lets per-league params be
+      reused even when the rest of the cache is incompatible.
+    * **Odds & features** — ``market_odds_source``/``betting_odds_source``
+      ("opening" vs "closing"), ``include_market_movement_features``, and the
+      ``*_feature_set`` overrides described below.
+    * **Output paths** — every ``*_file`` property is derived from
+      ``experiment_name`` so distinct experiments never overwrite each other.
+    """
+
     experiment_name: str = "baseline_xgboost_v3_formpoints"
     artifacts_dir: Path = Path("artifacts")
     train_cut: str = "2024-07-01"
@@ -30,6 +64,11 @@ class ExperimentConfig:
     market_odds_source: str = "closing"
     betting_odds_source: str = "closing"
     include_market_movement_features: bool = True
+    # When set, forces the learned models to use a named feature set instead of
+    # auto-selecting the best-scoring subset. Used to build feature-rich variants
+    # (e.g. understat/form-aware) whose features the user can actually exercise.
+    meta_feature_set: str | None = None
+    mlp_feature_set: str | None = None
 
     @property
     def params_file(self) -> Path:
@@ -135,3 +174,25 @@ FINAL_CONFIG = ExperimentConfig(
     allow_partial_param_cache=True,
 )
 CLOSING_MARKET_CONFIG = ExperimentConfig(experiment_name="final_closing_market_xg_comparison")
+
+# Feature-rich variant: same data/odds setup as the canonical experiment, but the
+# learned models are forced to use understat-xG-aware feature sets. This makes the
+# reconstructed pre-match features (see src/predictor.build_runtime_extra_features)
+# actually influence the prediction, so the user can compare a market-only model
+# against a feature-rich one. Trained via scripts/train_context_variant.py.
+CONTEXT_AWARE_CONFIG = ExperimentConfig(
+    experiment_name="context_aware_understat_xg",
+    market_odds_source="opening",
+    betting_odds_source="opening",
+    include_market_movement_features=False,
+    use_cached_artifacts=True,
+    allow_partial_param_cache=True,
+    force_retune_meta=True,
+    force_refit_meta_model=True,
+    force_retune_mlp=True,
+    force_refit_mlp_model=True,
+    force_retune_blend=True,
+    generate_upcoming_picks=False,
+    meta_feature_set="market_plus_understat_xg",
+    mlp_feature_set="default_plus_understat_xg",
+)

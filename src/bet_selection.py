@@ -1,3 +1,11 @@
+"""Validation-locked bet selection, probability-quality, and alternative-market audits.
+
+Produces the betting-side report CSVs. The central idea is **validation-locked
+selection**: betting filters (edge threshold, minimum probability, odds band) are
+chosen on validation and then applied unchanged to the test set, so reported ROI is
+not the result of fitting filters to the test data. It also writes probability-quality
+metrics, over/under (alternative-market) value bets, and a data-enrichment audit.
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -252,6 +260,7 @@ def write_probability_quality_report(
     split_probs: Mapping[str, Mapping[str, np.ndarray]],
     split_y: Mapping[str, np.ndarray],
 ) -> list[dict]:
+    """Write per-split, per-model probability-quality metrics (log loss/Brier/ECE/F1...) to CSV."""
     rows = []
     for split, probs_by_model in split_probs.items():
         y_true = split_y[split]
@@ -306,6 +315,12 @@ def write_validation_selected_betting_reports(
     min_validation_bets: int = 50,
     min_fold_bets: int = 10,
 ) -> list[dict]:
+    """Choose betting filters on validation, apply them to test, and write the bet reports.
+
+    Filters (edge threshold, min probability, odds band) are selected per model on the
+    validation set — with chronological-fold and minimum-bet gates to avoid overfitting —
+    then applied unchanged to the test set. Writes the selector and bucket report CSVs.
+    """
     selector_rows: list[dict] = []
     bucket_rows: list[dict] = []
     fold_masks = _chronological_fold_masks(validation_match_info, n_folds=2)
@@ -568,6 +583,7 @@ def write_alternative_market_report(
     split_X: Mapping[str, np.ndarray],
     split_match_info: Mapping[str, list[dict]],
 ) -> list[dict]:
+    """Audit value betting on the over/under 2.5 goals (alternative) market and write its CSV."""
     rows: list[dict] = []
     total_xg_idx = FEATURE_COLUMNS.index("total_xg")
 
@@ -714,6 +730,7 @@ def write_data_enrichment_audit(
     run_ts: str,
     split_match_info: Mapping[str, list[dict]],
 ) -> list[dict]:
+    """Audit how much each enrichment source (odds, understat, context) is actually present per split."""
     rows = []
     odds_triplets = {
         "opening_1x2_odds": ("open_odds_home", "open_odds_draw", "open_odds_away"),

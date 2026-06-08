@@ -1,3 +1,21 @@
+"""End-to-end training/evaluation pipeline orchestration.
+
+:func:`run_training_pipeline` is the heart of the project. For each league it:
+
+1. splits the data on the config's fixed date cuts (train / late-validation / test);
+2. tunes or reuses the base (Elo + Dixon-Coles) parameters;
+3. builds leakage-safe streaming features, then tunes/fits the learned meta-models
+   (XGBoost, MLP, Logistic Regression), each selecting its best feature subset;
+4. tunes the ensemble blend weights and the market-logit correction;
+5. evaluates everything on the held-out test set with many metrics plus a realistic
+   betting simulation, and writes the artifacts + reports.
+
+Artifact caching is governed by :data:`PIPELINE_VERSION` and a data/config
+fingerprint (see :func:`_cached_artifacts_are_compatible`): expensive tuning is
+reused whenever it is provably still valid, and each experiment writes to its own
+files so runs never overwrite each other. The bulk of this module is the reporting
+helpers that produce the human-readable summaries and CSVs.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -71,6 +89,8 @@ from src.external_context import EXTERNAL_CONTEXT_VALUE_COLUMNS, MATCH_CONTEXT_F
 from src.metrics import class_metric_summary
 
 
+# Bump this whenever the artifact format or feature layout changes; cached
+# artifacts from an older version are treated as incompatible and recomputed.
 PIPELINE_VERSION = 13
 
 PARAMETER_IMPACT_BASELINE = {
@@ -158,6 +178,13 @@ def _data_fingerprint() -> dict:
 
 
 def _cached_artifacts_are_compatible(config: ExperimentConfig) -> bool:
+    """True if the saved artifacts can be safely reused for this config.
+
+    Reuse is allowed only when the manifest exists, was produced by the current
+    :data:`PIPELINE_VERSION`, matches the experiment's config fields (split cuts,
+    odds setup, etc.), and the input-data fingerprint is unchanged. Any mismatch
+    forces a retune/refit so stale numbers never leak into a run.
+    """
     manifest = load_json_if_exists(config.manifest_file)
     if manifest is None:
         print("Cached artifact manifest missing; retuning/refitting artifacts.")
@@ -729,6 +756,14 @@ def _ablation_row(model_name: str, feature_set: str, probs: np.ndarray, y_true: 
 
 
 def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
+    """Run the full per-league training + evaluation pipeline for an experiment.
+
+    Drives every stage end to end (see the module docstring) and persists all
+    artifacts/reports under paths derived from ``config.experiment_name``. Cached
+    tuning is reused when :func:`_cached_artifacts_are_compatible` (and the config's
+    ``force_*`` flags) allow it; otherwise it is recomputed. The canonical artifacts
+    of other experiments are never touched.
+    """
     _validate_odds_source_config(config)
     print(
         "Odds setup: "
@@ -973,6 +1008,9 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "market_logit_away",
         *MARKET_CONTEXT_FEATURE_COLUMNS,
     ])
+    # Candidate feature subsets the XGBoost meta-model chooses among (by late-val
+    # log loss). On the canonical experiment the market-only subset wins; a config
+    # with meta_feature_set set restricts this to a single named subset instead.
     learned_model_feature_sets = {
         "all_features": all_cols,
         "core_18": CORE_COLS,
@@ -1022,6 +1060,15 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         print("Using cached XGBoost hyperparameters...")
     else:
         best_meta_cfg = tune_xgb_hyperparams(X_early_arr, y_early_arr, X_late_arr, y_late_arr)
+        meta_candidate_sets = learned_model_feature_sets
+        if config.meta_feature_set:
+            if config.meta_feature_set not in learned_model_feature_sets:
+                raise ValueError(
+                    f"Unknown meta_feature_set {config.meta_feature_set!r}; "
+                    f"available: {sorted(learned_model_feature_sets)}"
+                )
+            meta_candidate_sets = {config.meta_feature_set: learned_model_feature_sets[config.meta_feature_set]}
+            print(f"Forcing XGBoost feature set: {config.meta_feature_set}")
         xgb_subset, xgb_subset_rows = tune_feature_subset(
             lambda: XGBClassifier(
                 n_estimators=int(best_meta_cfg["n_estimators"]),
@@ -1036,7 +1083,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             y_early_arr,
             X_late_arr,
             y_late_arr,
-            learned_model_feature_sets,
+            meta_candidate_sets,
         )
         best_meta_cfg["feature_set"] = xgb_subset["name"]
         best_meta_cfg["feature_columns"] = [FEATURE_COLUMNS[i] for i in xgb_subset["cols"]]
@@ -1069,6 +1116,8 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         meta_final.save_model(str(config.model_file))
         print(f"Saved trained XGBoost meta-model to: {config.model_file}")
 
+    # Candidate feature subsets the MLP chooses among (mirrors the XGBoost search);
+    # mlp_feature_set in the config can force a single named subset.
     mlp_candidate_feature_sets = {
         "default": MLP_DEFAULT_COLS,
         "default_plus_odds_context": sorted(set(MLP_DEFAULT_COLS + MARKET_CONTEXT_COLS)),
@@ -1096,13 +1145,22 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
             X_late_arr[:, MLP_DEFAULT_COLS],
             y_late_arr,
         )
+        mlp_candidate_sets = mlp_candidate_feature_sets
+        if config.mlp_feature_set:
+            if config.mlp_feature_set not in mlp_candidate_feature_sets:
+                raise ValueError(
+                    f"Unknown mlp_feature_set {config.mlp_feature_set!r}; "
+                    f"available: {sorted(mlp_candidate_feature_sets)}"
+                )
+            mlp_candidate_sets = {config.mlp_feature_set: mlp_candidate_feature_sets[config.mlp_feature_set]}
+            print(f"Forcing MLP feature set: {config.mlp_feature_set}")
         best_subset, subset_rows = tune_mlp_feature_subset(
             X_early_arr,
             y_early_arr,
             X_late_arr,
             y_late_arr,
             base_mlp_cfg,
-            mlp_candidate_feature_sets,
+            mlp_candidate_sets,
         )
         best_mlp_cfg = dict(base_mlp_cfg)
         best_mlp_cfg["feature_set"] = best_subset["name"]

@@ -1,3 +1,11 @@
+"""Fetch team-news context (lineups, injuries, suspensions) from API-Football.
+
+Pulls per-fixture lineup availability and absence/injury/suspension counts and
+writes them into the external ``match_context.csv``. Requires an API-Football key and
+is rate-limited on the free plan (see the printed hints); entirely optional — without
+it the context features fall back to neutral defaults. Driven by
+``scripts/update_team_news.py``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -345,7 +353,7 @@ def print_plan_error_hint(plan_errors: list[dict]) -> None:
     print("Your free account says it can access API seasons 2022 to 2024, not the current 2025 season.")
     print("So upcoming 2025-2026 injuries/lineups need a paid API-Football plan or another source.")
     print("For free historical training data, run:")
-    print("  python update_team_news.py --free-training")
+    print("  python scripts/update_team_news.py --free-training")
 
 
 def print_rate_limit_hint(rate_limit_errors: list[dict]) -> None:
@@ -359,7 +367,7 @@ def print_rate_limit_hint(rate_limit_errors: list[dict]) -> None:
         print(f"Retry-After: {retry_after} seconds")
     print("Nothing is wrong with the model; the free API is refusing more requests right now.")
     print("Wait a bit, then continue with a smaller batch:")
-    print("  python update_team_news.py --free-training --max 10")
+    print("  python scripts/update_team_news.py --free-training --max 10")
     print("Rows already written are skipped on the next run.")
 
 

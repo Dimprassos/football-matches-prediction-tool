@@ -1,3 +1,12 @@
+"""The canonical feature layout and the helpers that build feature vectors.
+
+:data:`FEATURE_COLUMNS` is the single source of truth for the order of every
+feature the models consume; the other ``*_FEATURE_COLUMNS`` lists are named subsets
+(market, local stats, understat, team news, weather...) that the meta-models choose
+among. :func:`feature_indices` converts a list of names to column positions, and
+the ``build_*`` functions assemble the matrices fed to the models. The order here
+must stay in sync with the vectors produced in :mod:`src.state_builder`.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -6,6 +15,8 @@ import pandas as pd
 from src.calibration import safe_logit
 
 
+# Canonical feature order (index positions matter everywhere): 3 model logits,
+# 3 market logits, then the base-aux block, then the extra-aux blocks.
 FEATURE_COLUMNS = [
     "model_logit_home", "model_logit_draw", "model_logit_away",
     "market_logit_home", "market_logit_draw", "market_logit_away",
@@ -86,6 +97,7 @@ NEW_DATA_FEATURE_COLUMNS = NEW_LOCAL_FEATURE_COLUMNS + UNDERSTAT_XG_FEATURE_COLU
 
 
 def feature_indices(feature_names: list[str] | tuple[str, ...]) -> list[int]:
+    """Convert feature names to their column positions in :data:`FEATURE_COLUMNS`."""
     return [FEATURE_COLUMNS.index(col) for col in feature_names]
 
 
@@ -94,6 +106,11 @@ MLP_NO_REST_COLS = [i for i, col in enumerate(FEATURE_COLUMNS) if not col.starts
 
 
 def market_probs_from_odds_row(odds_h, odds_d, odds_a):
+    """Convert decimal 1/X/2 odds to overround-removed probabilities (NaN if invalid).
+
+    Inverts the odds and renormalises to strip the bookmaker margin. Returns NaNs
+    when any odd is missing or <= 1.0 (i.e. no usable market).
+    """
     if not (np.isfinite(odds_h) and np.isfinite(odds_d) and np.isfinite(odds_a)):
         return np.array([np.nan, np.nan, np.nan], dtype=float)
     if odds_h <= 1.0001 or odds_d <= 1.0001 or odds_a <= 1.0001:
@@ -106,6 +123,7 @@ def market_probs_from_odds_row(odds_h, odds_d, odds_a):
 
 
 def ensure_market_probs(model_probs: np.ndarray, market_probs: np.ndarray) -> np.ndarray:
+    """Fill any non-finite market rows with the model's probabilities (so features stay valid)."""
     fixed = np.asarray(market_probs, dtype=float).copy()
     model_probs = np.asarray(model_probs, dtype=float)
     for i in range(len(fixed)):
@@ -115,6 +133,11 @@ def ensure_market_probs(model_probs: np.ndarray, market_probs: np.ndarray) -> np
 
 
 def build_meta_features(model_probs: np.ndarray, market_probs: np.ndarray, aux: np.ndarray) -> np.ndarray:
+    """Assemble the full feature matrix: model logits, market logits, then aux features.
+
+    Probabilities are stored as logits (via ``safe_logit``) so the linear/tree models
+    see an unbounded representation. The aux block is appended per row in FEATURE_COLUMNS order.
+    """
     model_probs = np.asarray(model_probs, dtype=float)
     market_fixed = ensure_market_probs(model_probs, market_probs)
     aux = np.asarray(aux, dtype=float)
@@ -148,6 +171,11 @@ def build_single_feature_vector(
     form_a,
     extra_aux=None,
 ):
+    """Build the 1-row feature matrix for a single fixture (used at serve time).
+
+    Constructs the 12-element base-aux block from the supplied components, appends
+    ``extra_aux`` when given, and delegates to :func:`build_meta_features`.
+    """
     mom_diff = mom_h - mom_a
     rest_diff = rest_h - rest_a
     form_diff = form_h - form_a
@@ -171,6 +199,11 @@ def build_single_feature_vector(
 
 
 def time_split_val(val_df: pd.DataFrame):
+    """Split the validation set chronologically into early and late halves.
+
+    The late half is the held-out slice used to tune feature subsets, blend weights,
+    and the market correction, keeping that tuning separate from model fitting.
+    """
     val_sorted = val_df.sort_values("date").reset_index(drop=True)
     mid = len(val_sorted) // 2
     return val_sorted.iloc[:mid].copy(), val_sorted.iloc[mid:].copy()

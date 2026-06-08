@@ -1,3 +1,9 @@
+"""Console summary of the saved final reports for the canonical experiment.
+
+Reads the latest run's rows from each ``final_*`` artifact CSV and prints a
+consolidated overview (model metrics, ablations, betting robustness, per-league
+selection...). Run with ``python -m src.final_report``.
+"""
 from __future__ import annotations
 
 import pandas as pd
@@ -6,6 +12,7 @@ from src.config import FINAL_CONFIG
 
 
 def _latest_rows(path):
+    """Return the rows of the most recent run in a report CSV (empty if missing)."""
     if not path.exists():
         return pd.DataFrame()
     df = pd.read_csv(path)
@@ -15,6 +22,7 @@ def _latest_rows(path):
 
 
 def main():
+    """Print the consolidated final-report summary from the saved artifact CSVs."""
     model_rows = _latest_rows(FINAL_CONFIG.final_model_summary_file)
     ablation_rows = _latest_rows(FINAL_CONFIG.final_ablation_summary_file)
     robustness_rows = _latest_rows(FINAL_CONFIG.final_betting_robustness_file)

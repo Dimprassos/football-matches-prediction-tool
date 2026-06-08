@@ -1,7 +1,13 @@
+"""Console report of per-league test log loss for each model."""
 from sklearn.metrics import log_loss
 
 
 def print_per_league_test_metrics(leagues, per_league_test, probs_meta, probs_mlp, probs_ens):
+    """Print a per-league table of base/market/meta/MLP/ensemble test log loss.
+
+    The pooled meta/MLP/ensemble probability arrays are sliced back per league in the
+    same order they were stacked, so each league's metrics align with its rows.
+    """
     print("\n=== PER-LEAGUE TEST METRICS ===")
     print("=" * 80)
 

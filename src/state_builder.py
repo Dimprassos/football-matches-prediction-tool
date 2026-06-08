@@ -1,3 +1,21 @@
+"""Per-league state, recent-form/context features, and the leakage-safe streaming pass.
+
+This module turns raw match history into the inputs every model consumes:
+
+* :class:`LeagueState` holds the rolling Elo ratings, per-team strengths, and
+  history needed to score a new fixture as of a given date.
+* :func:`compute_match_components` produces the base-model probabilities plus the
+  12-element "base aux" vector (elo/lambda/momentum/rest/form differentials).
+* :func:`compute_pre_match_extra_features` reconstructs the "extra aux" vector
+  (recent form, understat xG, market movement, lineup/injury/weather context) from
+  past matches only — so it is identical at train and serve time.
+* :func:`streaming_block_probs_home_away` walks the fixtures chronologically,
+  updating state after each matchday, guaranteeing no future information leaks into
+  a match's features.
+
+Feature layout: the full feature vector is ``6 market/base outputs + BASE_AUX_LEN
+base aux + EXTRA_AUX_LEN extra aux`` (see :data:`feature_builder.FEATURE_COLUMNS`).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +36,15 @@ from src.poisson_model import (
 
 @dataclass
 class LeagueState:
+    """Snapshot of a league's modelling state as of the most recent processed match.
+
+    Bundles the Elo ratings and history, the home/away attack/defence strengths,
+    the league average scoring rates, the tuned base-model ``params``, and
+    (optionally) ``played_df`` — the understat-merged match history kept so the
+    runtime predictor can reconstruct pre-match extra features for an arbitrary
+    fixture.
+    """
+
     ratings: Dict[str, float]
     elo_history: Dict[str, list[float]]
     last_match_date: Dict[str, pd.Timestamp]
@@ -29,13 +56,25 @@ class LeagueState:
     league_avg_home: float
     league_avg_away: float
     params: dict
+    # Played-match history (incl. understat columns) used to reconstruct
+    # pre-match extra features at serve time. Optional for backward compat.
+    played_df: pd.DataFrame | None = None
 
 
+# The feature vector is: 6 base/market outputs, then 12 "base aux" features
+# (elo/lambda/momentum/rest/form), then the remaining "extra aux" features
+# (recent form, understat, market movement, lineup/injury/weather context).
 BASE_AUX_LEN = 12
 EXTRA_AUX_LEN = len(FEATURE_COLUMNS) - 6 - BASE_AUX_LEN
 
 
 def odds_triplet_from_row(row: pd.Series, source: str = "closing") -> tuple[float, float, float]:
+    """Extract (home, draw, away) decimal odds for the requested source.
+
+    ``source`` is "opening", "closing", or "legacy". Closing odds fall back to the
+    legacy ``odds_*`` columns when any closing value is missing; non-finite values
+    are returned as NaN so downstream code can detect missing markets.
+    """
     if source == "opening":
         cols = ("open_odds_home", "open_odds_draw", "open_odds_away")
     elif source == "closing":
@@ -56,6 +95,11 @@ def odds_triplet_from_row(row: pd.Series, source: str = "closing") -> tuple[floa
 
 
 def dynamic_init_rating(ratings: Dict[str, float], init_rating: float = 1500.0) -> float:
+    """Initial Elo for a newly-seen team: the mean of the three weakest current teams.
+
+    Promoted/new teams should not enter at the league-average 1500; once enough
+    teams exist we seed them near the bottom of the table instead.
+    """
     if len(ratings) >= 5:
         bottom_elos = sorted(ratings.values())[:3]
         return float(sum(bottom_elos) / len(bottom_elos))
@@ -73,6 +117,12 @@ def update_elo_state(
     home_adv: float,
     init_rating: float = 1500.0,
 ):
+    """Update Elo ratings, Elo history, last-played dates, and points history in place.
+
+    Iterates the batch chronologically applying a margin-of-victory-scaled Elo
+    update with a home advantage, and records 3/1/0 points per result. Mutates and
+    returns the four state dicts.
+    """
     for _, m in matches_batch.iterrows():
         h, a = m["home_team"], m["away_team"]
         dyn_init = dynamic_init_rating(ratings, init_rating)
@@ -113,12 +163,14 @@ def update_elo_state(
 
 
 def get_team_momentum(team: str, current_rating: float, elo_history: Dict[str, list[float]], window: int = 4) -> float:
+    """Elo change over the last ``window`` matches, scaled by 400 (0.0 if not enough history)."""
     if team not in elo_history or len(elo_history[team]) < window:
         return 0.0
     return (current_rating - elo_history[team][-window]) / 400.0
 
 
 def get_recent_points_form(team: str, points_history: Dict[str, list[float]], window: int = 5) -> float:
+    """Average points-per-match over the last ``window`` games, normalised to [0, 1]."""
     team_points = points_history.get(team, [])
     if not team_points:
         return 0.0
@@ -127,6 +179,7 @@ def get_recent_points_form(team: str, points_history: Dict[str, list[float]], wi
 
 
 def get_rest_days(team: str, match_date: pd.Timestamp, last_match_date: Dict[str, pd.Timestamp], default_days: int = 7, cap_days: int = 21) -> float:
+    """Days since the team last played, capped at ``cap_days`` and expressed in weeks."""
     last_date = last_match_date.get(team)
     if last_date is None:
         return float(default_days) / 7.0
@@ -136,6 +189,12 @@ def get_rest_days(team: str, match_date: pd.Timestamp, last_match_date: Dict[str
 
 
 def _recent_team_means(team: str, past_matches: pd.DataFrame, window: int = 5) -> dict:
+    """Mean of a team's last ``window`` matches across goals/shots/corners/cards/understat.
+
+    Looks at the team whether it played home or away (picking the right column
+    prefix each time) and averages only finite values. Returns zeros when there is
+    no history. This is the source of the recent-form and understat-xG extra features.
+    """
     defaults = {
         "goals_for": 0.0,
         "goals_against": 0.0,
@@ -207,6 +266,12 @@ def _recent_team_means(team: str, past_matches: pd.DataFrame, window: int = 5) -
 
 
 def neutral_extra_features() -> np.ndarray:
+    """Zero-valued extra-aux vector with sensible neutral defaults for non-zero features.
+
+    Used as a fallback when no history is available (e.g. ou25_over_prob=0.5,
+    lineup strengths=1.0, temperature=15C). Positions are looked up by name so the
+    vector stays aligned with FEATURE_COLUMNS.
+    """
     extra = np.zeros(EXTRA_AUX_LEN, dtype=float)
     defaults = {
         "ou25_over_prob": 0.5,
@@ -221,6 +286,7 @@ def neutral_extra_features() -> np.ndarray:
 
 
 def _finite_or_default(value, default: float) -> float:
+    """Coerce ``value`` to float, returning ``default`` when it is missing/non-finite."""
     value = pd.to_numeric(value, errors="coerce")
     if np.isfinite(value):
         return float(value)
@@ -228,6 +294,7 @@ def _finite_or_default(value, default: float) -> float:
 
 
 def _weather_severity(temperature_c: float, wind_kph: float, precipitation_mm: float) -> float:
+    """Combine temperature discomfort, wind, and rain into a single 0-5 severity score."""
     temp_discomfort = abs(float(temperature_c) - 15.0) / 20.0
     wind_component = max(0.0, float(wind_kph)) / 40.0
     rain_component = max(0.0, float(precipitation_mm)) / 10.0
@@ -241,6 +308,14 @@ def compute_pre_match_extra_features(
     *,
     include_market_movement_features: bool = True,
 ) -> np.ndarray:
+    """Build the EXTRA_AUX_LEN feature vector for one fixture from past matches only.
+
+    Combines home/away recent-form means and their differentials, market movement
+    (close minus open probabilities, zeroed when disabled or missing), over/under and
+    Asian-handicap signals, understat xG/npxG/xpts form, and lineup/injury/weather
+    context. The element order is fixed and must match FEATURE_COLUMNS; a length
+    check guards against drift.
+    """
     home = row["home_team"]
     away = row["away_team"]
     home_recent = _recent_team_means(home, past_matches, window=window)
@@ -349,6 +424,12 @@ def compute_pre_match_extra_features(
 
 
 def build_league_state(played_df: pd.DataFrame, params: dict) -> LeagueState:
+    """Construct a :class:`LeagueState` from the full played history and tuned params.
+
+    Fits the time-decayed home/away strengths and replays Elo over every match so
+    the returned state reflects all known results. Retains ``played_df`` for serve-time
+    feature reconstruction. Used by the runtime predictor (not the streaming pass).
+    """
     played_df = played_df.sort_values("date").reset_index(drop=True)
     l_avg_h, l_avg_a, att_h, def_h, att_a, def_a = fit_team_strengths_home_away_weighted(played_df, decay=params["decay"])
 
@@ -378,10 +459,17 @@ def build_league_state(played_df: pd.DataFrame, params: dict) -> LeagueState:
         league_avg_home=l_avg_h,
         league_avg_away=l_avg_a,
         params=params,
+        played_df=played_df,
     )
 
 
 def compute_match_components(home_team: str, away_team: str, state: LeagueState, match_date: pd.Timestamp | None = None, extra_aux=None):
+    """Compute base-model probabilities and the aux feature vector for one fixture.
+
+    Predicts Dixon-Coles goal rates (Elo-adjusted), derives the 12 base-aux features
+    (elo/lambda/momentum/rest/form and their differentials), and appends ``extra_aux``
+    when supplied. Returns a dict with ``probs``, ``aux``, and the individual components.
+    """
     p = state.params
     dyn_init = dynamic_init_rating(state.ratings)
     elo_h = state.ratings.get(home_team, dyn_init)
@@ -455,6 +543,15 @@ def streaming_block_probs_home_away(
     betting_odds_source: str = "closing",
     include_market_movement_features: bool = True,
 ):
+    """Score every fixture in ``predict_df`` chronologically, leakage-free.
+
+    Walks matchday by matchday: state (Elo + strengths) is built only from matches
+    strictly before each date, the day's fixtures are scored, then state is updated
+    with that day's results. This is the canonical training/eval feature builder and
+    guarantees a match never sees its own or future outcomes.
+
+    Returns ``(model_probs, y_true, market_probs, aux_matrix, raw_betting_odds)``.
+    """
     params = {"beta": beta, "rho": rho, "decay": decay, "K": K, "ha": home_adv}
     probs_model = []
     probs_mkt = []

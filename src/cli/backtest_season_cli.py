@@ -1,3 +1,9 @@
+"""CLI for running a leakage-safe single-season betting backtest.
+
+Builds an :class:`ExperimentConfig` whose train/validation/test cuts isolate one
+target season (with the prior season as validation) and runs the standard pipeline
+on it, so each historical season can be evaluated as if predicted in real time.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +13,7 @@ from src.trainer import run_training_pipeline
 
 
 def season_window(season_start: int) -> tuple[str, str, str]:
+    """Return (train_cut, test_cut, test_end) ISO dates isolating one season for backtesting."""
     if season_start < 2014:
         raise ValueError("season must be 2014 or later so the pipeline has a full prior validation season")
     return (

@@ -1,3 +1,9 @@
+"""Interactive command-line predictor for a single custom match.
+
+Prompts for a league, the two teams, and odds, then prints every model's 1/X/2
+probabilities. The terminal counterpart of the Streamlit predict page; both call
+:func:`src.predictor.predict_custom_match`.
+"""
 from __future__ import annotations
 
 import warnings
@@ -8,6 +14,7 @@ from src.predictor import get_league_runtime_state, load_runtime_artifacts, pred
 
 
 def pick_team(teams, prompt):
+    """Prompt for a team name and resolve it via case-insensitive substring match."""
     raw = input(prompt).strip()
     if not raw:
         return None

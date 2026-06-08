@@ -1,3 +1,10 @@
+"""Betting robustness and per-league strategy reports.
+
+Stress-tests the betting edge by breaking ROI down across slices (season, league,
+odds band) and, like :mod:`src.bet_selection`, selecting strategies on validation
+and applying them to test. Answers "does the edge survive once we stop cherry-picking,
+and is it concentrated in particular leagues/segments?".
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -96,6 +103,7 @@ def write_betting_robustness_report(
     *,
     edge_threshold: float,
 ) -> list[dict]:
+    """Write per-model betting ROI broken down by season/league/odds-band plus a bet curve."""
     summary_rows: list[dict] = []
     curve_rows: list[dict] = []
 
@@ -195,6 +203,12 @@ def write_league_specific_strategy_report(
     min_fold_bets: int = 5,
     min_logloss_improvement_vs_market: float = 0.0,
 ) -> list[dict]:
+    """Select a betting strategy per league on validation and report its test ROI.
+
+    For each league it picks the model/strategy that bets well on validation (subject
+    to minimum-bet, chronological-fold, and log-loss-vs-market gates), then evaluates
+    that locked choice on the test set. Writes the league-selection and strategy CSVs.
+    """
     candidate_models = [
         model
         for model in ["market_corr", "meta", "logreg", "mlp"]

@@ -1,3 +1,10 @@
+"""Literature-grounded benchmark: public-feature models vs the betting market.
+
+Trains simple, paper-style classifiers (logistic regression, random forest) on
+publicly available features and compares them against the market baseline, to place
+this project's results in the context of the published football-prediction
+literature. A diagnostic/benchmark script, separate from the main pipeline.
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,8 +1,16 @@
+"""Canonical team-name mapping across data sources.
+
+Different feeds (football-data CSVs, Understat, API-Football) spell the same club
+differently. :func:`normalize_team_name` maps each source's spelling to the single
+canonical name used throughout the project, so merges line up correctly.
+"""
 from __future__ import annotations
 
 import pandas as pd
 
 
+# Per-league {source spelling -> canonical name}. Multiple encodings of accented
+# names are listed so mojibake from different feeds still maps correctly.
 TEAM_NAME_MAP = {
     "england": {
         "Spurs": "Tottenham",
@@ -87,6 +95,7 @@ TEAM_NAME_MAP = {
 
 
 def normalize_team_name(name, league_folder):
+    """Map a raw team name to its canonical form for ``league_folder`` (whitespace-normalised)."""
     if pd.isna(name):
         return name
     name = " ".join(str(name).strip().split())

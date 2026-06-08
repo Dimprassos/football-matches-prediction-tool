@@ -1,3 +1,9 @@
+"""Tiny persistence helpers for artifacts (JSON, pickle, manifest, append-only CSV).
+
+Centralises reading/writing of the files the pipeline produces. :func:`append_rows_to_csv`
+is schema-tolerant: it migrates an existing CSV's header when new columns appear, so
+appending newer report rows never corrupts older files.
+"""
 from __future__ import annotations
 
 import json
@@ -8,6 +14,7 @@ from typing import Any
 
 
 def load_json_if_exists(path: Path):
+    """Load JSON from ``path``, or return None if the file does not exist."""
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -15,18 +22,21 @@ def load_json_if_exists(path: Path):
 
 
 def save_json(path: Path, obj: Any):
+    """Write ``obj`` as indented JSON, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
 
 def save_pickle(path: Path, obj: Any):
+    """Pickle ``obj`` to ``path``, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(obj, f)
 
 
 def load_pickle_if_exists(path: Path):
+    """Unpickle from ``path``, or return None if the file does not exist."""
     if path.exists():
         with open(path, "rb") as f:
             return pickle.load(f)
@@ -34,10 +44,12 @@ def load_pickle_if_exists(path: Path):
 
 
 def save_manifest(path: Path, manifest: dict):
+    """Persist an experiment manifest (JSON) used for cache-compatibility checks."""
     save_json(path, manifest)
 
 
 def append_rows_to_csv(path: Path, rows: list[dict]):
+    """Append dict rows to a CSV, migrating the header if new columns appear."""
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)

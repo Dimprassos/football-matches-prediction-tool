@@ -1,3 +1,10 @@
+"""Poisson / Dixon-Coles goal model: team strengths, scoring rates, outcome probs.
+
+Estimates per-team attack/defence strengths (overall, home/away, and recency-
+weighted variants), turns them into expected goal rates (lambdas) for a fixture,
+optionally Elo-adjusts those rates, and converts a pair of lambdas into 1/X/2
+probabilities using the Dixon-Coles low-score correction.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -45,6 +52,7 @@ def fit_team_strengths(train: pd.DataFrame, eps: float = 1e-6):
     return league_avg_home, league_avg_away, attack, defense
 
 def poisson_pmf(k: int, lam: float) -> float:
+    """Poisson probability of exactly ``k`` goals given rate ``lam``."""
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
@@ -74,6 +82,7 @@ def match_outcome_probs_dc(lam_h: float, lam_a: float, rho: float, max_goals: in
 def predict_lambdas(home_team: str, away_team: str,
                     league_avg_home: float, league_avg_away: float,
                     attack: dict, defense: dict):
+    """Expected home/away goal rates from overall (non home/away-split) strengths."""
     ah = attack.get(home_team, 1.0)
     dh = defense.get(home_team, 1.0)
     aa = attack.get(away_team, 1.0)
@@ -84,6 +93,7 @@ def predict_lambdas(home_team: str, away_team: str,
     return lam_home, lam_away
 
 def apply_elo_to_lambdas(lam_home: float, lam_away: float, elo_home: float, elo_away: float, beta: float = 0.15):
+    """Nudge the goal rates by the Elo gap (strength ``beta``), with a 0.05 safety floor."""
     d = (elo_home - elo_away) / 400.0
     lam_home_adj = lam_home * math.exp(beta * d)
     lam_away_adj = lam_away * math.exp(-beta * d)
@@ -345,6 +355,7 @@ def predict_lambdas_home_away(
     attack_home: dict, defense_home: dict,
     attack_away: dict, defense_away: dict,
 ):
+    """Expected home/away goal rates from home/away-split team strengths (the default model)."""
     ah = attack_home.get(home_team, 1.0)
     dh = defense_home.get(home_team, 1.0)
     aa = attack_away.get(away_team, 1.0)

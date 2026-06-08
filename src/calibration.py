@@ -1,3 +1,11 @@
+"""Probability calibration: logit transform, softmax, and temperature scaling.
+
+Temperature scaling is the project's calibration method: :func:`fit_temperature`
+finds the single ``T`` that minimises validation NLL, and :func:`temperature_scale_probs`
+applies it (T>1 softens an overconfident model, T<1 sharpens an underconfident one).
+:func:`safe_logit` is the feature transform used when packing probabilities into the
+meta-feature matrix.
+"""
 import numpy as np
 from typing import Optional
 

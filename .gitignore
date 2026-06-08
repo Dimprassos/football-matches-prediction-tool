@@ -14,16 +14,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# Generated model/report artifacts. Existing tracked artifacts are unaffected;
-# use `git add -f artifacts/<file>` only when you intentionally want to version one.
-artifacts/*
-!artifacts/paper_pages/
-!artifacts/paper_pages/**
-artifacts/*.tmp
-
-project_review.txt
-codex_response_log.txt
-model_explanation_local.txt
+# Generated model/report artifacts (source-only repo: not versioned).
+# Regenerate locally with `python scripts/main.py`.
+artifacts/
 
 # Optional/local enrichment datasets and API caches.
 data/external/*.csv
@@ -32,3 +25,10 @@ data/external/api_football_cache/
 
 # Reference literature PDFs (kept local, not versioned).
 papers/
+
+# Internal AI-workflow / planning files (not part of the deliverable).
+.agent/
+docs/
+SKILLS/
+CHANGELOG.md
+plan.md

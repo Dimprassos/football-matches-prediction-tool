@@ -101,7 +101,7 @@ $env:API_FOOTBALL_KEY="your_key_here"
 Then fetch the next local fixture window:
 
 ```bash
-python update_team_news.py
+python scripts/update_team_news.py
 ```
 
 This simple command fetches injuries/suspensions for the next 7 days and writes `match_context.csv`. Useful quota-safe options:
@@ -115,13 +115,13 @@ This simple command fetches injuries/suspensions for the next 7 days and writes 
 For slow historical backfill, use a narrow date range and include played matches:
 
 ```bash
-python update_team_news.py --from-date 2024-08-01 --to-date 2024-08-31 --played --max 40
+python scripts/update_team_news.py --from-date 2024-08-01 --to-date 2024-08-31 --played --max 40
 ```
 
 For the API-Football free plan, the current 2025-2026 season may be blocked. Use the built-in free historical training mode instead:
 
 ```bash
-python update_team_news.py --free-training
+python scripts/update_team_news.py --free-training
 ```
 
 This targets API seasons 2022-2024 and skips rows that are already present in `match_context.csv`, so you can rerun it later without repeating the same fixture-detail calls.
@@ -129,19 +129,19 @@ This targets API seasons 2022-2024 and skips rows that are already present in `m
 For a specific leakage-safe backtest, prefer the targeted mode. Example: backtest `--season 2023` needs validation 2022-2023 and test 2023-2024 context:
 
 ```bash
-python update_team_news.py --backtest-season 2023 --max 10
+python scripts/update_team_news.py --backtest-season 2023 --max 10
 ```
 
 This targets the test period by default. To fill the validation period too:
 
 ```bash
-python update_team_news.py --backtest-season 2023 --period validation --max 10
+python scripts/update_team_news.py --backtest-season 2023 --period validation --max 10
 ```
 
 If API-Football returns HTTP 429, wait and continue with a smaller batch:
 
 ```bash
-python update_team_news.py --free-training --max 10
+python scripts/update_team_news.py --free-training --max 10
 ```
 
 The importer writes `lineup_available`, lineup completeness, injury counts, suspension counts, absence counts, and trace columns such as `api_football_fixture_id`. It does not invent player quality ratings; `home_lineup_strength` and `away_lineup_strength` are lineup completeness scores unless a richer licensed source is added later.

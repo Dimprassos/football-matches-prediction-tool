@@ -1,3 +1,10 @@
+"""Hyper-parameter tuning for the base (Elo + Dixon-Coles Poisson) model.
+
+The base model combines per-team attack/defence strengths (a Poisson/Dixon-Coles
+goal model) with an Elo adjustment of the scoring rates. This module grid-searches
+its parameters on the validation split in a leakage-safe way and returns the best
+config, which the trainer then freezes per league.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -11,6 +18,13 @@ from src.state_builder import streaming_block_probs_home_away
 
 
 def _validation_rows_with_elo(train_fit, val, *, K, home_adv):
+    """Return the validation rows with Elo ratings computed leakage-free.
+
+    Elo is path-dependent, so the ratings going into a validation match must come
+    from a single chronological pass over train+validation (a match's rating must
+    reflect only earlier matches). We tag the validation rows, concatenate, sort by
+    date, run Elo once, then extract the validation slice back in its original order.
+    """
     train_tagged = train_fit.copy()
     train_tagged["_is_tune_validation"] = False
     train_tagged["_tune_validation_order"] = -1
@@ -39,6 +53,19 @@ def _validation_rows_with_elo(train_fit, val, *, K, home_adv):
 
 
 def tune_league_params(train_fit, val, full_played_df):
+    """Grid-search the base-model parameters for one league on its validation split.
+
+    Searched (by validation log loss):
+
+    * ``K`` (Elo update rate) and ``home_adv`` (Elo home edge), jointly;
+    * ``beta`` (how strongly Elo shifts the Poisson scoring rates);
+    * ``decay`` (exponential time-decay weighting of older matches in the strength fit);
+    * finally ``rho`` (Dixon-Coles low-score correlation correction) and ``T``
+      (temperature for probability calibration), tuned jointly on the leakage-safe
+      streaming probabilities.
+
+    Returns a dict of the chosen ``{K, ha, beta, decay, rho, T}``.
+    """
     Ks = [40, 50, 60, 70]
     home_advs = [60, 80, 100, 110]
     betas = [0.10, 0.11, 0.12, 0.13]

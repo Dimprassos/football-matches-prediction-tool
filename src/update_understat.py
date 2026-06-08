@@ -1,3 +1,10 @@
+"""Refresh the local Understat expected-goals (xG) export.
+
+Scrapes/loads Understat per-match xG/npxG/xpts for the configured leagues and writes
+the consolidated ``data/external/understat_matches.csv`` that
+:func:`src.understat_data.add_understat_xg` later merges in. Optional/offline-friendly;
+run with ``python src/update_understat.py``.
+"""
 from __future__ import annotations
 
 import argparse
