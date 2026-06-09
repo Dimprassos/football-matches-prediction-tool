@@ -22,6 +22,7 @@ artifacts/
 data/external/*.csv
 data/external/*.parquet
 data/external/api_football_cache/
+data/external/understat_match_cache/
 
 # Reference literature PDFs (kept local, not versioned).
 papers/

@@ -196,3 +196,24 @@ CONTEXT_AWARE_CONFIG = ExperimentConfig(
     meta_feature_set="market_plus_understat_xg",
     mlp_feature_set="default_plus_understat_xg",
 )
+
+
+# Player-aware variant: same setup as the context-aware one, but its forced feature
+# sets add the lineup-strength signal (home/away/diff) built from the Understat starters.
+# Lets the served prediction respond to the chosen XI for an honest ablation vs market.
+PLAYER_CONTEXT_CONFIG = ExperimentConfig(
+    experiment_name="player_context_aware",
+    market_odds_source="opening",
+    betting_odds_source="opening",
+    include_market_movement_features=False,
+    use_cached_artifacts=True,
+    allow_partial_param_cache=True,
+    force_retune_meta=True,
+    force_refit_meta_model=True,
+    force_retune_mlp=True,
+    force_refit_mlp_model=True,
+    force_retune_blend=True,
+    generate_upcoming_picks=False,
+    meta_feature_set="market_plus_lineup",
+    mlp_feature_set="default_plus_lineup",
+)

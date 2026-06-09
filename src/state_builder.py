@@ -349,6 +349,14 @@ def compute_pre_match_extra_features(
     wind_kph = _finite_or_default(row.get("wind_kph", np.nan), 0.0)
     precipitation_mm = _finite_or_default(row.get("precipitation_mm", np.nan), 0.0)
     weather_severity = _weather_severity(temperature_c, wind_kph, precipitation_mm)
+    home_absence_strength_loss = _finite_or_default(row.get("home_absence_strength_loss", np.nan), 0.0)
+    away_absence_strength_loss = _finite_or_default(row.get("away_absence_strength_loss", np.nan), 0.0)
+    absence_strength_loss_diff = _finite_or_default(
+        row.get("absence_strength_loss_diff", np.nan),
+        home_absence_strength_loss - away_absence_strength_loss,
+    )
+    home_player_context_available = _finite_or_default(row.get("home_player_context_available", np.nan), 0.0)
+    away_player_context_available = _finite_or_default(row.get("away_player_context_available", np.nan), 0.0)
 
     extra = np.array([
         home_recent["goals_for"],
@@ -417,6 +425,11 @@ def compute_pre_match_extra_features(
         wind_kph,
         precipitation_mm,
         weather_severity,
+        home_absence_strength_loss,
+        away_absence_strength_loss,
+        absence_strength_loss_diff,
+        home_player_context_available,
+        away_player_context_available,
     ], dtype=float)
     if len(extra) != EXTRA_AUX_LEN:
         raise ValueError(f"Expected {EXTRA_AUX_LEN} extra features, got {len(extra)}")

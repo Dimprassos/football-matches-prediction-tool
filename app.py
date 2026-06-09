@@ -28,22 +28,35 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.config import CONTEXT_AWARE_CONFIG, FINAL_CONFIG
+from src.config import CONTEXT_AWARE_CONFIG, FINAL_CONFIG, PLAYER_CONTEXT_CONFIG
+from src.player_context import (
+    build_player_strength_index,
+    build_runtime_player_context,
+    load_player_context_tables,
+)
 from src.predictor import (
     get_league_runtime_state,
     load_runtime_artifacts,
     predict_custom_match,
 )
+from src.team_names import normalize_team_name
 
 warnings.simplefilter("ignore")
 
 ROOT = Path(__file__).resolve().parent
 RAW_DIR = ROOT / "data" / "raw"
+EXTERNAL_DIR = ROOT / "data" / "external"
 USER_FILE = "zz_user_added.csv"  # one per league; appended rows the loader auto-merges
 CANONICAL_EXP = FINAL_CONFIG.experiment_name
 
 LEAGUES = ["england", "spain", "italy", "germany", "france"]
 OUTCOME_SHORT = ["1", "X", "2"]
+PLAYER_CONTEXT_FILES = [
+    "player_registry.csv",
+    "player_match_stats.csv",
+    "match_lineups.csv",
+    "match_absences.csv",
+]
 
 # --------------------------------------------------------------------------- #
 # i18n: language code -> display name, and the current-language helper         #
@@ -113,15 +126,18 @@ CONFIDENCE_LABELS = {
 PREDICT_EXPERIMENTS = {
     FINAL_CONFIG.experiment_name: FINAL_CONFIG,
     CONTEXT_AWARE_CONFIG.experiment_name: CONTEXT_AWARE_CONFIG,
+    PLAYER_CONTEXT_CONFIG.experiment_name: PLAYER_CONTEXT_CONFIG,
 }
 EXPERIMENT_LABELS = {
     "el": {
         FINAL_CONFIG.experiment_name: "Αγορά (canonical)",
         CONTEXT_AWARE_CONFIG.experiment_name: "Πλούσιο σε features (understat/form)",
+        PLAYER_CONTEXT_CONFIG.experiment_name: "Με εντεκάδες (lineup strength)",
     },
     "en": {
         FINAL_CONFIG.experiment_name: "Market (canonical)",
         CONTEXT_AWARE_CONFIG.experiment_name: "Feature-rich (understat/form)",
+        PLAYER_CONTEXT_CONFIG.experiment_name: "Lineup-aware (lineup strength)",
     },
 }
 
@@ -182,6 +198,25 @@ TEXT = {
         "prediction_model": "Μοντέλο πρόβλεψης",
         "prediction_model_help": ("Το backend υπολογίζει όλα τα μοντέλα· εδώ επιλέγεις "
                                   "ποιο θα προβληθεί ως κύρια πρόβλεψη."),
+        "player_context_header": "Player context / ενδεκάδες και απουσίες",
+        "player_context_enable": "Χρήση χειροκίνητων ενδεκάδων/απουσιών",
+        "player_context_match_date": "Ημερομηνία αγώνα για rolling player strength",
+        "player_context_no_registry": ("Δεν υπάρχουν παίκτες στο `player_registry.csv` για μία ή και τις δύο "
+                                       "ομάδες. Μπορείς να δώσεις `player_id` χειροκίνητα."),
+        "home_starters": "Βασικοί γηπεδούχου",
+        "away_starters": "Βασικοί φιλοξενούμενης",
+        "home_absences": "Απουσίες γηπεδούχου",
+        "away_absences": "Απουσίες φιλοξενούμενης",
+        "absence_type": "Τύπος απουσίας",
+        "absence_status": "Κατάσταση",
+        "player_ids_placeholder": "player_id ανά γραμμή ή με κόμμα",
+        "player_context_empty": "Δεν δόθηκαν παίκτες. Η πρόβλεψη μένει χωρίς player context.",
+        "player_context_neutral": ("Δόθηκαν παίκτες, αλλά δεν βρέθηκαν rolling stats ή importance tier. "
+                                   "Θα χρησιμοποιηθεί neutral fallback."),
+        "player_context_ready": ("Player context ενεργό: home={home:.0f}, away={away:.0f}, "
+                                 "absence diff={diff:.2f}"),
+        "player_context_summary": "Σύνοψη player context",
+        "player_context_load_error": "Σφάλμα φόρτωσης player context: {exc}",
         "same_team_warning": "Ο γηπεδούχος και η φιλοξενούμενη δεν μπορεί να είναι η ίδια ομάδα.",
         "predict_button": "Πρόβλεψη",
         "prediction_error": "Σφάλμα πρόβλεψης: {exc}",
@@ -268,6 +303,24 @@ TEXT = {
         "prediction_model": "Prediction model",
         "prediction_model_help": ("The backend computes every model; here you choose "
                                   "which one is shown as the main prediction."),
+        "player_context_header": "Player context / lineups and absences",
+        "player_context_enable": "Use manual lineups/absences",
+        "player_context_match_date": "Match date for rolling player strength",
+        "player_context_no_registry": ("No `player_registry.csv` players were found for one or both teams. "
+                                       "You can enter `player_id` values manually."),
+        "home_starters": "Home starters",
+        "away_starters": "Away starters",
+        "home_absences": "Home absences",
+        "away_absences": "Away absences",
+        "absence_type": "Absence type",
+        "absence_status": "Status",
+        "player_ids_placeholder": "one player_id per line or comma separated",
+        "player_context_empty": "No players were provided. Prediction stays without player context.",
+        "player_context_neutral": ("Players were provided, but no rolling stats or importance tier were found. "
+                                   "The neutral fallback will be used."),
+        "player_context_ready": "Player context active: home={home:.0f}, away={away:.0f}, absence diff={diff:.2f}",
+        "player_context_summary": "Player context summary",
+        "player_context_load_error": "Player context load error: {exc}",
         "same_team_warning": "The home and away team cannot be the same.",
         "predict_button": "Predict",
         "prediction_error": "Prediction error: {exc}",
@@ -357,6 +410,32 @@ def load_state(league: str, exp_name: str = CANONICAL_EXP):
     return get_league_runtime_state(league, params)
 
 
+def _player_context_token() -> str:
+    """Changes when any player-context CSV changes, to bust the Streamlit cache."""
+    parts = []
+    for name in PLAYER_CONTEXT_FILES:
+        path = EXTERNAL_DIR / name
+        parts.append(f"{name}:{path.stat().st_mtime}" if path.exists() else f"{name}:0")
+    return "|".join(parts)
+
+
+@st.cache_data(show_spinner=False)
+def load_player_tables(token: str):
+    """Load optional player-context CSVs from data/external."""
+    return load_player_context_tables(EXTERNAL_DIR)
+
+
+@st.cache_resource(show_spinner=True)
+def load_player_strength_index(token: str):
+    """Build and cache the player-strength index (expensive; rebuilt only when CSVs change).
+
+    The tables came through the strict loader, which already normalizes names/dates, so
+    the index can skip re-normalization and just group.
+    """
+    tables = load_player_context_tables(EXTERNAL_DIR)
+    return build_player_strength_index(tables.match_stats, tables.registry, assume_normalized=True)
+
+
 def eval_file(exp: str) -> Path:
     """Path to an experiment's saved probability-quality evaluation CSV."""
     return FINAL_CONFIG.artifacts_dir / f"final_probability_quality_{exp}.csv"
@@ -366,7 +445,12 @@ def list_eval_experiments() -> list[str]:
     """Experiments relevant to the tool that have a stored evaluation report:
     the canonical experiment the thesis cites, plus the user's own retrain."""
     return [
-        e for e in (CANONICAL_EXP, CONTEXT_AWARE_CONFIG.experiment_name, "user_retrain")
+        e for e in (
+            CANONICAL_EXP,
+            CONTEXT_AWARE_CONFIG.experiment_name,
+            PLAYER_CONTEXT_CONFIG.experiment_name,
+            "user_retrain",
+        )
         if eval_file(e).exists()
     ]
 
@@ -456,7 +540,7 @@ def append_user_match(league: str, d: date, home: str, away: str, fthg: int, fta
 
 
 def run_prediction(league: str, home: str, away: str, oh: float, od: float, oa: float,
-                   exp_name: str = CANONICAL_EXP):
+                   exp_name: str = CANONICAL_EXP, context: dict | None = None):
     """Load the chosen experiment's state + artifacts and predict one fixture."""
     state = load_state(league, exp_name)
     (_params, meta_model, meta_cfg, mlp_model, mlp_meta,
@@ -465,6 +549,7 @@ def run_prediction(league: str, home: str, away: str, oh: float, od: float, oa: 
         home, away, oh, od, oa, state,
         meta_model, meta_cfg, mlp_model, mlp_meta, blend_cfg,
         logreg_model=logreg_model, logreg_meta=logreg_meta,
+        context=context,
     )
 
 
@@ -503,6 +588,189 @@ def probs_table(res: dict) -> pd.DataFrame:
             "Confidence (%)": round(100 * float(p.max()), 1),
         })
     return pd.DataFrame(rows)
+
+
+def _team_registry_rows(registry: pd.DataFrame, league: str, team: str, match_date: date) -> pd.DataFrame:
+    """Registry rows active for ``team`` at the chosen runtime prediction date."""
+    if registry is None or registry.empty:
+        return pd.DataFrame()
+
+    league_norm = str(league).strip().lower()
+    team_norm = normalize_team_name(team, league_norm)
+    as_of = pd.Timestamp(match_date)
+    rows = registry.copy()
+    date_from = pd.to_datetime(rows.get("date_from", pd.Series(pd.NaT, index=rows.index)), errors="coerce")
+    date_to = pd.to_datetime(rows.get("date_to", pd.Series(pd.NaT, index=rows.index)), errors="coerce")
+    mask = (
+        (rows["league"].astype(str) == league_norm)
+        & (rows["team"].astype(str) == team_norm)
+        & (date_from.isna() | (date_from <= as_of))
+        & (date_to.isna() | (date_to >= as_of))
+    )
+    rows = rows.loc[mask].copy()
+    if rows.empty:
+        return rows
+    rows["player_id"] = rows["player_id"].astype(str)
+    rows = rows.sort_values(["player_name", "player_id"])
+    return rows.drop_duplicates("player_id", keep="last").reset_index(drop=True)
+
+
+def _player_label_map(rows: pd.DataFrame) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for _, row in rows.iterrows():
+        player_id = str(row.get("player_id", "")).strip()
+        if not player_id:
+            continue
+        name = str(row.get("player_name", player_id)).strip() or player_id
+        meta = [
+            str(row.get(col, "")).strip()
+            for col in ("position", "importance_tier")
+            if str(row.get(col, "")).strip() and str(row.get(col, "")).strip() != "unknown"
+        ]
+        labels[player_id] = f"{name} ({', '.join(meta)})" if meta else name
+    return labels
+
+
+def _parse_player_ids(text: str) -> list[str]:
+    seen: set[str] = set()
+    player_ids: list[str] = []
+    for part in str(text or "").replace(",", "\n").splitlines():
+        player_id = part.strip()
+        if player_id and player_id not in seen:
+            player_ids.append(player_id)
+            seen.add(player_id)
+    return player_ids
+
+
+def _player_ids_input(label_key: str, rows: pd.DataFrame, key: str,
+                      default: list[str] | None = None) -> list[str]:
+    default = [str(p) for p in (default or [])]
+    if rows is None or rows.empty:
+        value = st.text_area(
+            t(label_key),
+            value="\n".join(default),
+            key=f"{key}_text",
+            placeholder=t("player_ids_placeholder"),
+            height=96,
+        )
+        return _parse_player_ids(value)
+
+    labels = _player_label_map(rows)
+    options = list(dict.fromkeys(rows["player_id"].astype(str).tolist()))
+    preselect = [p for p in default if p in options]
+    return st.multiselect(
+        t(label_key),
+        options,
+        default=preselect,
+        format_func=lambda player_id: labels.get(player_id, player_id),
+        key=f"{key}_select",
+    )
+
+
+def _absence_items_input(label_key: str, rows: pd.DataFrame, key: str) -> list[dict]:
+    player_ids = _player_ids_input(label_key, rows, key)
+    c1, c2 = st.columns(2)
+    absence_type = c1.selectbox(t("absence_type"), ["injury", "suspension", "rest", "other"], key=f"{key}_type")
+    status = c2.selectbox(t("absence_status"), ["out", "doubtful", "available"], key=f"{key}_status")
+    return [
+        {"player_id": player_id, "absence_type": absence_type, "status": status}
+        for player_id in player_ids
+    ]
+
+
+def _render_player_context_preview(context: dict | None, diagnostics: pd.DataFrame) -> None:
+    context = context or {}
+    if not context and (diagnostics is None or diagnostics.empty):
+        st.caption(t("player_context_empty"))
+        return
+
+    home_available = float(context.get("home_player_context_available", 0.0))
+    away_available = float(context.get("away_player_context_available", 0.0))
+    diff = float(context.get("absence_strength_loss_diff", 0.0))
+    has_strength = diagnostics is not None and not diagnostics.empty and bool(diagnostics["context_available"].astype(bool).any())
+    if has_strength:
+        st.success(t("player_context_ready", home=home_available, away=away_available, diff=diff))
+    else:
+        st.info(t("player_context_neutral"))
+
+    if diagnostics is None or diagnostics.empty:
+        return
+    show = diagnostics.copy()
+    show["player_name"] = show["player_name"].where(show["player_name"].astype(str).str.strip() != "", show["player_id"])
+    show["player_strength"] = pd.to_numeric(show["player_strength"], errors="coerce").round(3)
+    st.markdown(t("player_context_summary"))
+    st.dataframe(
+        show[[
+            "side",
+            "role",
+            "player_name",
+            "absence_type",
+            "status",
+            "player_strength",
+            "source",
+            "context_available",
+            "history_matches",
+        ]],
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def player_context_controls(league: str, home: str, away: str) -> dict | None:
+    """Optional Streamlit controls that build runtime player context for prediction."""
+    context: dict | None = None
+    with st.expander(t("player_context_header")):
+        enabled = st.checkbox(t("player_context_enable"), value=False)
+        if not enabled:
+            return None
+
+        match_date = st.date_input(t("player_context_match_date"), value=date.today())
+        try:
+            tables = load_player_tables(_player_context_token())
+        except Exception as exc:  # noqa: BLE001 - show validation errors in the UI
+            st.error(t("player_context_load_error", exc=exc))
+            return None
+
+        home_rows = _team_registry_rows(tables.registry, league, home, match_date)
+        away_rows = _team_registry_rows(tables.registry, league, away, match_date)
+        if home_rows.empty or away_rows.empty:
+            st.info(t("player_context_no_registry"))
+
+        # Pre-fill each side with its likely XI (most-used players recently) so the user
+        # can tweak rather than pick 11 from scratch.
+        index = load_player_strength_index(_player_context_token())
+        home_xi = index.likely_xi(home, league, match_date)
+        away_xi = index.likely_xi(away, league, match_date)
+
+        h_col, a_col = st.columns(2)
+        with h_col:
+            st.markdown(f"**{home}**")
+            home_starters = _player_ids_input("home_starters", home_rows, "home_starters", default=home_xi)
+            home_absences = _absence_items_input("home_absences", home_rows, "home_absences")
+        with a_col:
+            st.markdown(f"**{away}**")
+            away_starters = _player_ids_input("away_starters", away_rows, "away_starters", default=away_xi)
+            away_absences = _absence_items_input("away_absences", away_rows, "away_absences")
+
+        try:
+            context, diagnostics = build_runtime_player_context(
+                league=league,
+                home_team=home,
+                away_team=away,
+                match_date=match_date,
+                registry=tables.registry,
+                match_stats=tables.match_stats,
+                home_starters=home_starters,
+                away_starters=away_starters,
+                home_absences=home_absences,
+                away_absences=away_absences,
+                index=load_player_strength_index(_player_context_token()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(t("player_context_load_error", exc=exc))
+            return None
+        _render_player_context_preview(context, diagnostics)
+    return context
 
 
 # --------------------------------------------------------------------------- #
@@ -555,15 +823,29 @@ def page_predict():
         help=t("prediction_model_help"),
     )
 
+    if exp_name == PLAYER_CONTEXT_CONFIG.experiment_name:
+        st.info({
+            "el": "Αυτό το πείραμα χρησιμοποιεί τη δύναμη εντεκάδας. Διάλεξε μοντέλο "
+                  "**XGBoost** για να δεις την εντεκάδα να αλλάζει την πρόβλεψη — το "
+                  "**ensemble** είναι market-dominated και δεν ανταποκρίνεται. (Το ablation "
+                  "έδειξε ότι τα lineup features δεν βελτιώνουν το logloss έναντι της αγοράς.)",
+            "en": "This experiment uses lineup strength. Pick the **XGBoost** model to see "
+                  "the lineup change the prediction — the **ensemble** is market-dominated and "
+                  "won't respond. (Ablation found lineup features do not improve logloss "
+                  "over the market.)",
+        }[lang])
+
     if home == away:
         st.warning(t("same_team_warning"))
         return
+
+    player_context = player_context_controls(league, home, away)
 
     if not st.button(t("predict_button"), type="primary"):
         return
 
     try:
-        res = run_prediction(league, home, away, oh, od, oa, exp_name)
+        res = run_prediction(league, home, away, oh, od, oa, exp_name, context=player_context)
     except Exception as exc:  # noqa: BLE001 - surface any backend error to the UI
         st.error(t("prediction_error", exc=exc))
         return

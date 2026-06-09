@@ -964,6 +964,13 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "market_logit_away",
         *EXTERNAL_CONTEXT_FEATURE_COLUMNS,
     ])
+    LINEUP_FEATURE_COLUMNS = ["home_lineup_strength", "away_lineup_strength", "lineup_strength_diff"]
+    MARKET_PLUS_LINEUP_COLS = feature_indices([
+        "market_logit_home",
+        "market_logit_draw",
+        "market_logit_away",
+        *LINEUP_FEATURE_COLUMNS,
+    ])
     MARKET_CONTEXT_PLUS_UNDERSTAT_XG_COLS = feature_indices([
         "market_logit_home",
         "market_logit_draw",
@@ -1023,6 +1030,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "core_plus_external_context": CORE_PLUS_EXTERNAL_CONTEXT_COLS,
         "market_plus_understat_xg": MARKET_PLUS_UNDERSTAT_XG_COLS,
         "market_plus_external_context": MARKET_PLUS_EXTERNAL_CONTEXT_COLS,
+        "market_plus_lineup": MARKET_PLUS_LINEUP_COLS,
         "market_context_plus_understat_xg": MARKET_CONTEXT_PLUS_UNDERSTAT_XG_COLS,
         "market_context_plus_external_context": MARKET_CONTEXT_PLUS_EXTERNAL_CONTEXT_COLS,
         "no_new_local_stats": NO_NEW_LOCAL_STATS_COLS,
@@ -1124,6 +1132,7 @@ def run_training_pipeline(config: ExperimentConfig = DEFAULT_CONFIG):
         "default_plus_rolling_stats": sorted(set(MLP_DEFAULT_COLS + LOCAL_STATS_COLS)),
         "default_plus_new_local": sorted(set(MLP_DEFAULT_COLS + NEW_LOCAL_COLS)),
         "default_plus_understat_xg": sorted(set(MLP_DEFAULT_COLS + feature_indices(UNDERSTAT_XG_FEATURE_COLUMNS))),
+        "default_plus_lineup": sorted(set(MLP_DEFAULT_COLS + feature_indices(["home_lineup_strength", "away_lineup_strength", "lineup_strength_diff"]))),
         "default_plus_team_news": sorted(set(MLP_DEFAULT_COLS + feature_indices(TEAM_NEWS_FEATURE_COLUMNS))),
         "default_plus_weather": sorted(set(MLP_DEFAULT_COLS + feature_indices(WEATHER_FEATURE_COLUMNS))),
         "default_plus_external_context": sorted(set(MLP_DEFAULT_COLS + feature_indices(EXTERNAL_CONTEXT_FEATURE_COLUMNS))),

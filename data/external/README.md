@@ -145,3 +145,99 @@ python scripts/update_team_news.py --free-training --max 10
 ```
 
 The importer writes `lineup_available`, lineup completeness, injury counts, suspension counts, absence counts, and trace columns such as `api_football_fixture_id`. It does not invent player quality ratings; `home_lineup_strength` and `away_lineup_strength` are lineup completeness scores unless a richer licensed source is added later.
+
+## Player-Aware Context Without EAFC/FIFA
+
+The project does not use EAFC/FIFA/SoFIFA ratings as the player-strength source.
+Player strength should come from real match participation and optional manual
+lineup/absence data. See:
+
+```text
+docs/PLAYER_CONTEXT_SCHEMA.md
+```
+
+Planned offline CSVs:
+
+```text
+data/external/player_registry.csv
+data/external/player_match_stats.csv
+data/external/match_lineups.csv
+data/external/match_absences.csv
+```
+
+The intended flow is:
+
+```text
+player_registry.csv
+player_match_stats.csv
+match_lineups.csv
+match_absences.csv
+  -> rolling player strength, using only matches before the target fixture
+  -> enriched match_context.csv
+  -> optional runtime/manual player context in the Streamlit prediction UI
+  -> player-aware features for a separate experiment variant
+```
+
+Leakage rule: confirmed lineups and absences can only be used for historical
+training if their availability before kickoff is known or explicitly assumed and
+documented. Otherwise they are allowed only as current manual prediction inputs.
+
+`player_match_stats.csv` can optionally include `team_goals`, `opponent_goals`,
+or `team_goal_diff`. These fields let the rolling player-strength helper estimate
+a simple on/off team goal-difference component. If they are absent, that component
+falls back to neutral instead of inventing impact.
+
+### Generating `player_match_stats.csv` from Understat
+
+`player_match_stats.csv` (and a derived `player_registry.csv`) can be produced for
+the five supported leagues directly from Understat, which is already the project's xG
+source:
+
+```bash
+python src/update_understat.py --players-only --start-season 2014 --end-season 2024
+```
+
+- `--players` builds the player datasets *in addition* to the team-level xG export;
+  `--players-only` skips the team-level export.
+- One request is made per match, so each match's JSON is cached under
+  `data/external/understat_match_cache/` (git-ignored). Reruns are resumable and only
+  fetch missing matches; add `--no-cache` to force a refetch.
+- `--max-matches N` caps the run for a quick test; `--no-registry` skips the registry.
+- Mapping: `started` from the Understat line-up (a `Sub` position is an off-the-bench
+  appearance), `minutes` from `time`, and `goals/assists/shots/key_passes/xg/xa`
+  directly. Team names are translated from Understat's long names ("Manchester City")
+  to the pipeline's names ("Man City") so the rolling-strength join lines up.
+
+Leakage note: Understat rosters are recorded *after* kickoff (who actually played),
+not pre-kickoff confirmed line-ups. Using them as historical participation for rolling
+player strength is reasonable (starters ≈ the confirmed XI), but treat the implied
+availability as an assumption — Understat does not provide injury/suspension reasons or
+pre-kickoff timestamps. `importance_tier` in the generated registry is left as
+`unknown` (a manual field), never inferred from minutes.
+
+The implemented conversion path is:
+
+```python
+from src.player_context import (
+    build_player_match_context,
+    load_player_context_tables,
+    merge_player_match_context,
+)
+
+tables = load_player_context_tables("data/external")
+player_context = build_player_match_context(
+    tables.registry,
+    tables.match_stats,
+    tables.lineups,
+    tables.absences,
+)
+```
+
+`merge_player_match_context(existing, player_context)` can combine these generated
+player fields with an existing `match_context.csv` while preserving unrelated
+weather/API columns.
+
+At runtime, `app.py` also reads `player_registry.csv` and `player_match_stats.csv`
+for the optional Player context expander. If the registry has active rows for the
+selected teams, the UI shows player choices; if not, it accepts manual `player_id`
+values and falls back to neutral strength when no stats/tier exist.

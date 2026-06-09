@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.artifact_store import append_rows_to_csv
 import src.update_api_football_context as api_football_context
+import src.update_understat as understat_scraper
 import src.data_processing as data_processing
 from scripts.update_team_news import _backtest_window
 from src.cli.backtest_season_cli import build_backtest_config, season_window
@@ -17,10 +18,26 @@ from src.calibration import temperature_scale_probs
 from src.config import ExperimentConfig
 from src.evaluation import betting_records, simulate_value_betting
 from src.external_context import add_external_match_context
-from src.feature_builder import ensure_market_probs, feature_indices, market_probs_from_odds_row
+from src.feature_builder import FEATURE_COLUMNS, ensure_market_probs, feature_indices, market_probs_from_odds_row
 from src.metrics import class_metric_summary
 from src.models.base import _validation_rows_with_elo
 from src.models.meta import blend_probabilities, market_logit_correction_probs, tune_market_logit_correction
+from src.player_context import (
+    MATCH_ABSENCES_COLUMNS,
+    MATCH_LINEUPS_COLUMNS,
+    PLAYER_MATCH_STATS_COLUMNS,
+    PLAYER_REGISTRY_COLUMNS,
+    build_runtime_player_context,
+    build_player_match_context,
+    build_player_strength_index,
+    compute_player_strength,
+    merge_player_match_context,
+    load_match_absences,
+    load_match_lineups,
+    load_player_match_stats,
+    load_player_context_tables,
+    load_player_registry,
+)
 from src.state_builder import EXTRA_AUX_LEN, compute_pre_match_extra_features, odds_triplet_from_row
 from src.team_names import normalize_team_name
 from src.trainer import (
@@ -407,6 +424,10 @@ class WeatherContextTests(unittest.TestCase):
             "temperature_c": 18.5,
             "wind_kph": 12.0,
             "precipitation_mm": 0.4,
+            "home_absence_strength_loss": 0.85,
+            "away_absence_strength_loss": 0.25,
+            "home_player_context_available": 1,
+            "away_player_context_available": 1,
         }])
 
         merged = merge_match_context(existing, weather)
@@ -925,6 +946,10 @@ class RollingFeatureTests(unittest.TestCase):
             "temperature_c": 18.5,
             "wind_kph": 12.0,
             "precipitation_mm": 0.4,
+            "home_absence_strength_loss": 0.85,
+            "away_absence_strength_loss": 0.25,
+            "home_player_context_available": 1,
+            "away_player_context_available": 1,
         }])
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "match_context.csv"
@@ -939,6 +964,500 @@ class RollingFeatureTests(unittest.TestCase):
         self.assertEqual(float(merged.loc[0, "away_suspension_count"]), 1.0)
         self.assertEqual(float(merged.loc[0, "home_manager_change_recent"]), 1.0)
         self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 18.5)
+        self.assertAlmostEqual(float(merged.loc[0, "home_absence_strength_loss"]), 0.85)
+        self.assertAlmostEqual(float(merged.loc[0, "away_absence_strength_loss"]), 0.25)
+        self.assertAlmostEqual(float(merged.loc[0, "absence_strength_loss_diff"]), 0.60)
+        self.assertEqual(float(merged.loc[0, "home_player_context_available"]), 1.0)
+
+
+class PlayerContextSchemaTests(unittest.TestCase):
+    def test_missing_player_context_files_return_empty_canonical_tables(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tables = load_player_context_tables(Path(tmpdir))
+
+        self.assertEqual(tables.registry.columns.tolist(), PLAYER_REGISTRY_COLUMNS)
+        self.assertEqual(tables.match_stats.columns.tolist(), PLAYER_MATCH_STATS_COLUMNS)
+        self.assertEqual(tables.lineups.columns.tolist(), MATCH_LINEUPS_COLUMNS)
+        self.assertEqual(tables.absences.columns.tolist(), MATCH_ABSENCES_COLUMNS)
+        self.assertTrue(tables.registry.empty)
+        self.assertTrue(tables.match_stats.empty)
+        self.assertTrue(tables.lineups.empty)
+        self.assertTrue(tables.absences.empty)
+
+    def test_player_context_loaders_normalize_valid_csvs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pd.DataFrame([{
+                "player_id": "barcelona_lamine_yamal_2025",
+                "player_name": "Lamine Yamal",
+                "team": "FC Barcelona",
+                "league": "SP1",
+                "season": 2025,
+                "position": "RW",
+                "importance_tier": "key",
+            }]).to_csv(root / "player_registry.csv", index=False)
+            pd.DataFrame([{
+                "date": "2025-09-14",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Valencia CF",
+                "player_id": "barcelona_lamine_yamal_2025",
+                "started": 1,
+                "minutes": 87,
+                "goals": 1,
+            }]).to_csv(root / "player_match_stats.csv", index=False)
+            pd.DataFrame([{
+                "date": "2026-01-18",
+                "kickoff_at": "2026-01-18T20:00:00+02:00",
+                "league": "La Liga",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "FC Barcelona",
+                "player_id": "barcelona_lamine_yamal_2025",
+                "is_starter": 1,
+                "is_sub": 0,
+                "source": "manual",
+                "available_at": "2026-01-18T18:45:00+02:00",
+            }]).to_csv(root / "match_lineups.csv", index=False)
+            pd.DataFrame([{
+                "date": "2026-01-18",
+                "kickoff_at": "2026-01-18T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "FC Barcelona",
+                "player_id": "barcelona_lamine_yamal_2025",
+                "absence_type": "injury",
+                "status": "doubtful",
+                "source": "manual",
+                "available_at": "2026-01-17T12:00:00+02:00",
+            }]).to_csv(root / "match_absences.csv", index=False)
+
+            tables = load_player_context_tables(root)
+
+        self.assertEqual(tables.registry.loc[0, "league"], "spain")
+        self.assertEqual(tables.registry.loc[0, "team"], "Barcelona")
+        self.assertEqual(tables.registry.loc[0, "normalized_player_name"], "lamine yamal")
+        self.assertEqual(tables.registry.loc[0, "importance_tier"], "key")
+        self.assertEqual(tables.match_stats.loc[0, "team"], "Barcelona")
+        self.assertEqual(tables.match_stats.loc[0, "opponent"], "Valencia")
+        self.assertEqual(tables.lineups.loc[0, "home_team"], "Barcelona")
+        self.assertEqual(tables.lineups.loc[0, "league"], "spain")
+        self.assertEqual(tables.absences.loc[0, "status"], "doubtful")
+
+    def test_lineup_available_after_kickoff_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "match_lineups.csv"
+            pd.DataFrame([{
+                "date": "2026-01-18",
+                "kickoff_at": "2026-01-18T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "Barcelona",
+                "away_team": "Real Madrid",
+                "team": "Barcelona",
+                "player_id": "p1",
+                "is_starter": 1,
+                "is_sub": 0,
+                "available_at": "2026-01-18T20:05:00+02:00",
+            }]).to_csv(path, index=False)
+
+            with self.assertRaisesRegex(ValueError, "available_at is after kickoff_at"):
+                load_match_lineups(path)
+
+    def test_invalid_importance_tier_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "player_registry.csv"
+            pd.DataFrame([{
+                "player_id": "p1",
+                "player_name": "Player One",
+                "team": "Barcelona",
+                "league": "spain",
+                "season": 2025,
+                "importance_tier": "superstar",
+            }]).to_csv(path, index=False)
+
+            with self.assertRaisesRegex(ValueError, "importance_tier contains invalid values"):
+                load_player_registry(path)
+
+
+class PlayerContextStrengthTests(unittest.TestCase):
+    def test_rolling_player_strength_ignores_future_rows(self):
+        rows = [
+            {
+                "date": "2025-01-01",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Valencia CF",
+                "player_id": "p1",
+                "started": 1,
+                "minutes": 90,
+                "goals": 0,
+                "assists": 0,
+                "team_goal_diff": 1,
+            },
+            {
+                "date": "2025-01-08",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Sevilla FC",
+                "player_id": "teammate",
+                "started": 1,
+                "minutes": 90,
+                "team_goal_diff": -1,
+            },
+            {
+                "date": "2025-01-15",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Getafe CF",
+                "player_id": "p1",
+                "started": 1,
+                "minutes": 90,
+                "goals": 0,
+                "assists": 0,
+                "team_goal_diff": 2,
+            },
+        ]
+        future_row = {
+            "date": "2025-02-01",
+            "league": "spain",
+            "team": "FC Barcelona",
+            "opponent": "Real Betis",
+            "player_id": "p1",
+            "started": 1,
+            "minutes": 90,
+            "goals": 8,
+            "assists": 4,
+            "team_goal_diff": 9,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            before_path = Path(tmpdir) / "before.csv"
+            after_path = Path(tmpdir) / "after.csv"
+            pd.DataFrame(rows).to_csv(before_path, index=False)
+            pd.DataFrame([*rows, future_row]).to_csv(after_path, index=False)
+            before_stats = load_player_match_stats(before_path)
+            after_stats = load_player_match_stats(after_path)
+
+        before = compute_player_strength("p1", "Barcelona", "spain", "2025-01-20", before_stats)
+        after = compute_player_strength("p1", "Barcelona", "spain", "2025-01-20", after_stats)
+        future_visible = compute_player_strength("p1", "Barcelona", "spain", "2025-02-10", after_stats)
+
+        self.assertEqual(before.source, "rolling_stats")
+        self.assertAlmostEqual(before.player_strength, after.player_strength)
+        self.assertAlmostEqual(before.minutes_share_last_10, 2 / 3)
+        self.assertAlmostEqual(before.starter_rate_last_10, 2 / 3)
+        self.assertGreater(before.on_off_component, 0.5)
+        self.assertGreater(future_visible.player_strength, after.player_strength)
+
+    def test_player_strength_uses_importance_tier_when_stats_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "player_registry.csv"
+            pd.DataFrame([{
+                "player_id": "p1",
+                "player_name": "Player One",
+                "team": "FC Barcelona",
+                "league": "SP1",
+                "season": 2025,
+                "importance_tier": "key",
+            }]).to_csv(path, index=False)
+            registry = load_player_registry(path)
+
+        strength = compute_player_strength(
+            "p1",
+            "Barcelona",
+            "spain",
+            "2025-01-20",
+            pd.DataFrame(columns=PLAYER_MATCH_STATS_COLUMNS),
+            registry,
+        )
+
+        self.assertEqual(strength.source, "importance_tier")
+        self.assertTrue(strength.context_available)
+        self.assertAlmostEqual(strength.player_strength, 0.85)
+
+    def test_player_strength_returns_neutral_without_stats_or_registry(self):
+        strength = compute_player_strength(
+            "missing",
+            "Barcelona",
+            "spain",
+            "2025-01-20",
+            pd.DataFrame(columns=PLAYER_MATCH_STATS_COLUMNS),
+            registry=None,
+        )
+
+        self.assertEqual(strength.source, "neutral")
+        self.assertFalse(strength.context_available)
+        self.assertEqual(strength.player_strength, 0.0)
+
+
+class PlayerMatchContextGenerationTests(unittest.TestCase):
+    def _write_player_context_inputs(self, root: Path):
+        pd.DataFrame([
+            {
+                "player_id": "p1",
+                "player_name": "Starter One",
+                "team": "FC Barcelona",
+                "league": "SP1",
+                "season": 2025,
+                "importance_tier": "key",
+            },
+            {
+                "player_id": "p2",
+                "player_name": "Starter Two",
+                "team": "FC Barcelona",
+                "league": "SP1",
+                "season": 2025,
+                "importance_tier": "rotation",
+            },
+            {
+                "player_id": "p_abs_home",
+                "player_name": "Absent Key",
+                "team": "FC Barcelona",
+                "league": "SP1",
+                "season": 2025,
+                "importance_tier": "key",
+            },
+            {
+                "player_id": "p_abs_away",
+                "player_name": "Away Rotation",
+                "team": "Real Madrid",
+                "league": "spain",
+                "season": 2025,
+                "importance_tier": "rotation",
+            },
+        ]).to_csv(root / "player_registry.csv", index=False)
+        pd.DataFrame([
+            {
+                "date": "2025-01-01",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Valencia CF",
+                "player_id": "p1",
+                "started": 1,
+                "minutes": 90,
+                "team_goal_diff": 2,
+                "goals": 1,
+                "assists": 0,
+            },
+            {
+                "date": "2025-01-08",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Sevilla FC",
+                "player_id": "p2",
+                "started": 1,
+                "minutes": 70,
+                "team_goal_diff": 1,
+                "goals": 0,
+                "assists": 1,
+            },
+            {
+                "date": "2025-01-15",
+                "league": "spain",
+                "team": "FC Barcelona",
+                "opponent": "Getafe CF",
+                "player_id": "other",
+                "started": 1,
+                "minutes": 90,
+                "team_goal_diff": -1,
+            },
+        ]).to_csv(root / "player_match_stats.csv", index=False)
+        pd.DataFrame([
+            {
+                "date": "2025-02-01",
+                "kickoff_at": "2025-02-01T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "FC Barcelona",
+                "player_id": "p1",
+                "is_starter": 1,
+                "is_sub": 0,
+                "available_at": "2025-02-01T18:45:00+02:00",
+            },
+            {
+                "date": "2025-02-01",
+                "kickoff_at": "2025-02-01T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "FC Barcelona",
+                "player_id": "p2",
+                "is_starter": 1,
+                "is_sub": 0,
+                "available_at": "2025-02-01T18:45:00+02:00",
+            },
+        ]).to_csv(root / "match_lineups.csv", index=False)
+        pd.DataFrame([
+            {
+                "date": "2025-02-01",
+                "kickoff_at": "2025-02-01T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "FC Barcelona",
+                "player_id": "p_abs_home",
+                "absence_type": "injury",
+                "status": "out",
+                "available_at": "2025-01-31T12:00:00+02:00",
+            },
+            {
+                "date": "2025-02-01",
+                "kickoff_at": "2025-02-01T20:00:00+02:00",
+                "league": "spain",
+                "home_team": "FC Barcelona",
+                "away_team": "Real Madrid",
+                "team": "Real Madrid",
+                "player_id": "p_abs_away",
+                "absence_type": "suspension",
+                "status": "doubtful",
+                "available_at": "2025-01-31T12:00:00+02:00",
+            },
+        ]).to_csv(root / "match_absences.csv", index=False)
+
+    def test_build_player_match_context_weights_lineups_and_absences(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_player_context_inputs(root)
+            tables = load_player_context_tables(root)
+
+            context = build_player_match_context(
+                tables.registry,
+                tables.match_stats,
+                tables.lineups,
+                tables.absences,
+            )
+
+        self.assertEqual(len(context), 1)
+        row = context.iloc[0]
+        self.assertEqual(row["home_team"], "Barcelona")
+        self.assertEqual(float(row["lineup_available"]), 1.0)
+        self.assertGreater(float(row["home_lineup_strength"]), 0.0)
+        self.assertEqual(float(row["team_news_available"]), 1.0)
+        self.assertEqual(float(row["home_injury_count"]), 1.0)
+        self.assertEqual(float(row["away_suspension_count"]), 0.5)
+        self.assertEqual(float(row["home_key_absence_count"]), 1.0)
+        self.assertAlmostEqual(float(row["home_absence_strength_loss"]), 0.85)
+        self.assertAlmostEqual(float(row["away_absence_strength_loss"]), 0.275)
+        self.assertAlmostEqual(float(row["absence_strength_loss_diff"]), 0.575)
+        self.assertEqual(float(row["home_player_context_available"]), 1.0)
+        self.assertEqual(float(row["away_player_context_available"]), 1.0)
+
+    def test_merge_player_match_context_preserves_existing_weather_columns(self):
+        existing = pd.DataFrame([{
+            "date": "2025-02-01",
+            "league": "SP1",
+            "home_team": "FC Barcelona",
+            "away_team": "Real Madrid",
+            "weather_available": 1,
+            "temperature_c": 12.5,
+            "home_absence_count": 99,
+        }])
+        player_context = pd.DataFrame([{
+            "date": pd.Timestamp("2025-02-01"),
+            "league": "spain",
+            "home_team": "Barcelona",
+            "away_team": "Real Madrid",
+            "home_absence_count": 1.0,
+            "home_absence_strength_loss": 0.85,
+            "home_player_context_available": 1.0,
+        }])
+
+        merged = merge_player_match_context(existing, player_context)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(float(merged.loc[0, "weather_available"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "temperature_c"]), 12.5)
+        self.assertEqual(float(merged.loc[0, "home_absence_count"]), 1.0)
+        self.assertAlmostEqual(float(merged.loc[0, "home_absence_strength_loss"]), 0.85)
+
+    def test_runtime_player_context_builds_manual_context_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_player_context_inputs(root)
+            tables = load_player_context_tables(root)
+
+            context, diagnostics = build_runtime_player_context(
+                league="spain",
+                home_team="FC Barcelona",
+                away_team="Real Madrid",
+                match_date="2025-02-01",
+                registry=tables.registry,
+                match_stats=tables.match_stats,
+                home_starters=["p1", "p2"],
+                away_absences=[{
+                    "player_id": "p_abs_away",
+                    "absence_type": "suspension",
+                    "status": "doubtful",
+                }],
+            )
+
+        self.assertEqual(context["lineup_available"], 1.0)
+        self.assertGreater(context["home_lineup_strength"], 0.0)
+        self.assertEqual(context["team_news_available"], 1.0)
+        self.assertEqual(context["away_suspension_count"], 0.5)
+        self.assertAlmostEqual(context["away_absence_strength_loss"], 0.275)
+        self.assertEqual(context["home_player_context_available"], 1.0)
+        self.assertEqual(context["away_player_context_available"], 1.0)
+        self.assertEqual(len(diagnostics), 3)
+        self.assertIn("rolling_stats", set(diagnostics["source"]))
+        self.assertIn("importance_tier", set(diagnostics["source"]))
+
+    def test_runtime_player_context_keeps_neutral_fallback_without_player_data(self):
+        context, diagnostics = build_runtime_player_context(
+            league="spain",
+            home_team="Barcelona",
+            away_team="Real Madrid",
+            match_date="2025-02-01",
+            home_starters=["unknown_player"],
+        )
+
+        self.assertEqual(context["lineup_available"], 1.0)
+        self.assertEqual(context["home_player_context_available"], 0.0)
+        self.assertEqual(context["away_player_context_available"], 0.0)
+        self.assertNotIn("home_lineup_strength", context)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics.loc[0, "source"], "neutral")
+
+    def test_runtime_player_context_rejects_invalid_absence_status(self):
+        with self.assertRaisesRegex(ValueError, "Invalid status"):
+            build_runtime_player_context(
+                league="spain",
+                home_team="Barcelona",
+                away_team="Real Madrid",
+                match_date="2025-02-01",
+                home_absences=[{"player_id": "p1", "status": "maybe"}],
+            )
+
+
+class PlayerContextFeatureAlignmentTests(unittest.TestCase):
+    def test_player_context_features_are_appended_and_read_by_state_builder(self):
+        self.assertEqual(FEATURE_COLUMNS[-5:], [
+            "home_absence_strength_loss",
+            "away_absence_strength_loss",
+            "absence_strength_loss_diff",
+            "home_player_context_available",
+            "away_player_context_available",
+        ])
+        row = pd.Series({
+            "home_team": "A",
+            "away_team": "B",
+            "home_absence_strength_loss": 0.85,
+            "away_absence_strength_loss": 0.25,
+            "home_player_context_available": 1,
+            "away_player_context_available": 1,
+        })
+
+        features = compute_pre_match_extra_features(row, pd.DataFrame())
+        offset = 6 + 12
+        home_loss = features[feature_indices(["home_absence_strength_loss"])[0] - offset]
+        diff = features[feature_indices(["absence_strength_loss_diff"])[0] - offset]
+        home_available = features[feature_indices(["home_player_context_available"])[0] - offset]
+
+        self.assertEqual(len(features), EXTRA_AUX_LEN)
+        self.assertAlmostEqual(float(home_loss), 0.85)
+        self.assertAlmostEqual(float(diff), 0.60)
+        self.assertEqual(float(home_available), 1.0)
 
 
 class RuntimePredictorFeatureTests(unittest.TestCase):
@@ -980,6 +1499,248 @@ class RuntimePredictorFeatureTests(unittest.TestCase):
         for played in (None, pd.DataFrame()):
             extra = build_runtime_extra_features("A", "B", SimpleNamespace(played_df=played))
             np.testing.assert_allclose(extra, neutral_extra_features())
+
+    def test_runtime_extra_features_apply_manual_player_context(self):
+        from types import SimpleNamespace
+
+        from src.predictor import build_runtime_extra_features
+
+        past = pd.DataFrame([{
+            "date": pd.Timestamp("2024-01-01"),
+            "home_team": "A",
+            "away_team": "B",
+            "home_goals": 1,
+            "away_goals": 0,
+        }])
+        context = {
+            "home_absence_strength_loss": 0.85,
+            "away_absence_strength_loss": 0.25,
+            "home_player_context_available": 1.0,
+            "away_player_context_available": 1.0,
+        }
+
+        extra = build_runtime_extra_features("A", "B", SimpleNamespace(played_df=past), context=context)
+        offset = 6 + 12
+        home_loss = extra[feature_indices(["home_absence_strength_loss"])[0] - offset]
+        diff = extra[feature_indices(["absence_strength_loss_diff"])[0] - offset]
+        home_available = extra[feature_indices(["home_player_context_available"])[0] - offset]
+
+        self.assertAlmostEqual(float(home_loss), 0.85)
+        self.assertAlmostEqual(float(diff), 0.60)
+        self.assertEqual(float(home_available), 1.0)
+
+
+class UnderstatPlayerScrapeTests(unittest.TestCase):
+    """The Understat per-player scraper must emit files the loaders accept."""
+
+    def _sample_match(self):
+        meta = {
+            "id": "555",
+            "date": "2023-08-12",
+            "home_title": "Arsenal",
+            "away_title": "Chelsea",
+            "home_goals": 2,
+            "away_goals": 1,
+        }
+        rosters = {
+            "h": {
+                "r1": {"player_id": "100", "player": "Alice Keeper", "position": "GK",
+                       "time": "90", "goals": "0", "assists": "0", "shots": "0",
+                       "key_passes": "1", "xG": "0", "xA": "0.10", "h_a": "h"},
+                "r2": {"player_id": "101", "player": "Bob Striker", "position": "FW",
+                       "time": "70", "goals": "1", "assists": "0", "shots": "3",
+                       "key_passes": "0", "xG": "0.40", "xA": "0", "h_a": "h"},
+                "r3": {"player_id": "102", "player": "Carl Sub", "position": "Sub",
+                       "time": "20", "goals": "0", "assists": "1", "shots": "1",
+                       "key_passes": "2", "xG": "0.05", "xA": "0.30", "h_a": "h"},
+            },
+            "a": {
+                "r4": {"player_id": "200", "player": "Dan Defender", "position": "DC",
+                       "time": "90", "goals": "0", "assists": "0", "shots": "0",
+                       "key_passes": "0", "xG": "0", "xA": "0", "h_a": "a"},
+            },
+        }
+        return meta, rosters
+
+    def test_observations_map_understat_roster_to_schema(self):
+        meta, rosters = self._sample_match()
+        obs = understat_scraper._match_player_observations("EPL", 2023, meta, rosters)
+        self.assertEqual(len(obs), 4)
+        by_id = {row["player_id"]: row for row in obs}
+        # started is derived from position: "Sub" means an off-the-bench appearance
+        self.assertEqual(by_id["100"]["started"], 1)
+        self.assertEqual(by_id["102"]["started"], 0)
+        self.assertEqual(by_id["102"]["minutes"], 20.0)
+        # home/away orientation, opponent, and scoreline-derived goal difference
+        self.assertEqual(by_id["101"]["home_away"], "home")
+        self.assertEqual(by_id["101"]["team"], "Arsenal")
+        self.assertEqual(by_id["101"]["opponent"], "Chelsea")
+        self.assertEqual(by_id["101"]["team_goals"], 2)
+        self.assertEqual(by_id["101"]["opponent_goals"], 1)
+        self.assertEqual(by_id["101"]["team_goal_diff"], 1)
+        self.assertEqual(by_id["200"]["home_away"], "away")
+        self.assertEqual(by_id["200"]["team_goal_diff"], -1)
+
+    def test_observations_translate_titles_through_team_name_bridge(self):
+        from src.understat_data import normalize_team_name as understat_join_key
+        meta = {
+            "id": "1", "date": "2023-08-12",
+            "home_title": "Manchester City", "away_title": "Wolverhampton Wanderers",
+            "home_goals": 3, "away_goals": 0,
+        }
+        rosters = {
+            "h": {"a": {"player_id": "1", "player": "P", "position": "FW", "time": "90", "h_a": "h"}},
+            "a": {"b": {"player_id": "2", "player": "Q", "position": "DC", "time": "90", "h_a": "a"}},
+        }
+        bridge = {
+            understat_join_key("Manchester City"): "Man City",
+            understat_join_key("Wolverhampton Wanderers"): "Wolves",
+        }
+        obs = understat_scraper._match_player_observations(
+            "EPL", 2023, meta, rosters, team_name_bridge=bridge
+        )
+        teams = {row["player_id"]: row["team"] for row in obs}
+        # Understat long names are translated to the main dataset's short names
+        self.assertEqual(teams["1"], "Man City")
+        self.assertEqual(teams["2"], "Wolves")
+
+    def test_generated_player_csvs_pass_loaders_and_feed_strength(self):
+        meta, rosters = self._sample_match()
+        observations = pd.DataFrame(
+            understat_scraper._match_player_observations("EPL", 2023, meta, rosters)
+        )
+        stats = understat_scraper.player_match_stats_from_observations(observations)
+        registry = understat_scraper.player_registry_from_observations(observations)
+        # producer output uses the canonical schemas exactly (no drift)
+        self.assertEqual(list(stats.columns), PLAYER_MATCH_STATS_COLUMNS)
+        self.assertEqual(list(registry.columns), PLAYER_REGISTRY_COLUMNS)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_path = Path(tmpdir) / "player_match_stats.csv"
+            registry_path = Path(tmpdir) / "player_registry.csv"
+            understat_scraper.write_player_match_stats(stats, stats_path)
+            understat_scraper.write_player_registry(registry, registry_path)
+            # the strict loaders accept the generated files without raising
+            loaded_stats = load_player_match_stats(stats_path)
+            loaded_registry = load_player_registry(registry_path)
+
+        self.assertEqual(len(loaded_stats), 4)
+        # the loader normalized the Understat league code to the canonical name
+        self.assertEqual(set(loaded_stats["league"]), {"england"})
+        # the generated stats are real history the rolling-strength path can use
+        strength = compute_player_strength(
+            "101", "Arsenal", "england", "2023-08-20", loaded_stats
+        )
+        self.assertEqual(strength.source, "rolling_stats")
+        self.assertGreater(strength.player_strength, 0.0)
+        self.assertEqual(strength.starter_rate_last_10, 1.0)
+
+        self.assertEqual(len(loaded_registry), 4)
+        # importance_tier is left as a manual field, not invented from participation
+        self.assertEqual(set(loaded_registry["importance_tier"]), {"unknown"})
+
+
+class PlayerStrengthIndexTests(unittest.TestCase):
+    """The fast index must return identical results to compute_player_strength."""
+
+    def _stats(self):
+        rows = []
+        # two teams, several matches each, one tracked player + teammates
+        for i, opp in enumerate(["Chelsea", "Arsenal", "Everton", "Spurs", "Leeds"]):
+            rows.append({
+                "date": f"2023-09-0{i+1}", "league": "EPL", "team": "Man City",
+                "opponent": opp, "player_id": "star", "started": 1, "minutes": 90,
+                "goals": 1, "assists": 0, "shots": 3, "key_passes": 1, "xg": 0.5, "xa": 0.1,
+                "team_goal_diff": 2,
+            })
+            rows.append({
+                "date": f"2023-09-0{i+1}", "league": "EPL", "team": "Man City",
+                "opponent": opp, "player_id": "sub", "started": 0, "minutes": 10,
+                "goals": 0, "assists": 0, "shots": 0, "key_passes": 0, "xg": 0.0, "xa": 0.0,
+                "team_goal_diff": 2,
+            })
+            rows.append({
+                "date": f"2023-09-0{i+1}", "league": "EPL", "team": "Liverpool",
+                "opponent": opp, "player_id": "lfc1", "started": 1, "minutes": 90,
+                "goals": 0, "assists": 1, "shots": 1, "key_passes": 2, "xg": 0.1, "xa": 0.3,
+                "team_goal_diff": 0,
+            })
+        return pd.DataFrame(rows)
+
+    def test_index_matches_compute_player_strength(self):
+        stats = self._stats()
+        index = build_player_strength_index(stats)
+        cases = [
+            ("star", "Man City", "england"),
+            ("sub", "Man City", "england"),
+            ("lfc1", "Liverpool", "england"),
+            ("ghost", "Man City", "england"),       # unknown player -> fallback
+            ("star", "Real Madrid", "spain"),        # unknown team -> fallback
+        ]
+        for pid, team, league in cases:
+            direct = compute_player_strength(pid, team, league, "2023-10-01", stats)
+            via_index = index.strength(pid, team, league, "2023-10-01")
+            self.assertEqual(direct.source, via_index.source, pid)
+            self.assertAlmostEqual(direct.player_strength, via_index.player_strength, places=9, msg=pid)
+            self.assertAlmostEqual(direct.starter_rate_last_10, via_index.starter_rate_last_10, places=9, msg=pid)
+            self.assertAlmostEqual(direct.minutes_share_last_10, via_index.minutes_share_last_10, places=9, msg=pid)
+            self.assertEqual(direct.history_matches, via_index.history_matches, pid)
+
+    def test_fixture_strengths_matches_per_player(self):
+        stats = self._stats()
+        index = build_player_strength_index(stats)
+        ids = ["star", "sub", "ghost"]
+        batched = index.fixture_strengths("Man City", "england", "2023-10-01", ids)
+        self.assertEqual(len(batched), len(ids))
+        for pid, b in zip(ids, batched):
+            single = index.strength(pid, "Man City", "england", "2023-10-01")
+            self.assertEqual(single.source, b.source, pid)
+            self.assertAlmostEqual(single.player_strength, b.player_strength, places=9, msg=pid)
+            self.assertAlmostEqual(single.minutes_share_last_10, b.minutes_share_last_10, places=9, msg=pid)
+
+    def test_likely_xi_ranks_recent_minutes(self):
+        index = build_player_strength_index(self._stats())
+        xi = index.likely_xi("Man City", "england", "2023-10-01", n=2)
+        self.assertEqual(xi[0], "star")        # 90' every match -> top
+        self.assertIn("sub", xi)
+        self.assertEqual(index.likely_xi("Real Madrid", "spain", "2023-10-01"), [])  # unknown team
+
+    def test_build_lineup_strength_context_is_leakage_safe(self):
+        from src.player_context import build_lineup_strength_context
+        rows = []
+        for d, opp in [("2023-09-01", "Chelsea"), ("2023-09-08", "Arsenal")]:
+            for pid in ["a", "b", "c"]:
+                rows.append({"date": d, "league": "EPL", "team": "Man City", "opponent": opp,
+                             "home_away": "home", "player_id": pid, "started": 1, "minutes": 90,
+                             "goals": 0, "assists": 0, "shots": 0, "key_passes": 0, "xg": 0.0,
+                             "xa": 0.0, "team_goal_diff": 1})
+            for pid in ["x", "y"]:
+                rows.append({"date": d, "league": "EPL", "team": opp, "opponent": "Man City",
+                             "home_away": "away", "player_id": pid, "started": 1, "minutes": 90,
+                             "goals": 0, "assists": 0, "shots": 0, "key_passes": 0, "xg": 0.0,
+                             "xa": 0.0, "team_goal_diff": -1})
+        ctx = build_lineup_strength_context(pd.DataFrame(rows))
+        ctx["date"] = pd.to_datetime(ctx["date"])
+        self.assertEqual(len(ctx), 2)
+        first = ctx[ctx["date"] == pd.Timestamp("2023-09-01")].iloc[0]
+        second = ctx[ctx["date"] == pd.Timestamp("2023-09-08")].iloc[0]
+        # fixture 1: no prior history -> no usable lineup strength
+        self.assertTrue(pd.isna(first["home_lineup_strength"]))
+        # fixture 2: Man City has fixture-1 history -> finite; Arsenal (first appearance) -> NaN
+        self.assertTrue(np.isfinite(second["home_lineup_strength"]))
+        self.assertTrue(pd.isna(second["away_lineup_strength"]))
+        self.assertEqual(second["home_team"], "Man City")
+
+    def test_index_respects_as_of_date_cutoff(self):
+        stats = self._stats()
+        index = build_player_strength_index(stats)
+        # before any match -> no history -> neutral/fallback
+        early = index.strength("star", "Man City", "england", "2023-08-01")
+        self.assertEqual(early.source, "neutral")
+        # after matches -> rolling stats
+        late = index.strength("star", "Man City", "england", "2023-10-01")
+        self.assertEqual(late.source, "rolling_stats")
+        self.assertGreater(late.player_strength, 0.0)
 
 
 if __name__ == "__main__":

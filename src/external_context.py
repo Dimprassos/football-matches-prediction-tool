@@ -38,6 +38,11 @@ EXTERNAL_CONTEXT_VALUE_COLUMNS = [
     "temperature_c",
     "wind_kph",
     "precipitation_mm",
+    "home_absence_strength_loss",
+    "away_absence_strength_loss",
+    "absence_strength_loss_diff",
+    "home_player_context_available",
+    "away_player_context_available",
 ]
 
 
@@ -169,6 +174,14 @@ def _normalize_match_context(raw: pd.DataFrame, league_name: str) -> pd.DataFram
     out["temperature_c"] = _numeric_col(filtered, ("temperature_c", "temp_c", "temperature"))
     out["wind_kph"] = _numeric_col(filtered, ("wind_kph", "wind_speed_kph", "wind"))
     out["precipitation_mm"] = _numeric_col(filtered, ("precipitation_mm", "precip_mm", "rain_mm", "rainfall_mm"))
+    out["home_absence_strength_loss"] = _numeric_col(filtered, ("home_absence_strength_loss", "absence_strength_loss_home"))
+    out["away_absence_strength_loss"] = _numeric_col(filtered, ("away_absence_strength_loss", "absence_strength_loss_away"))
+    out["absence_strength_loss_diff"] = _numeric_col(filtered, ("absence_strength_loss_diff",))
+    missing_strength_diff = out["absence_strength_loss_diff"].isna()
+    has_strength_parts = out["home_absence_strength_loss"].notna() | out["away_absence_strength_loss"].notna()
+    out.loc[missing_strength_diff & has_strength_parts, "absence_strength_loss_diff"] = (
+        out["home_absence_strength_loss"].fillna(0.0) - out["away_absence_strength_loss"].fillna(0.0)
+    )[missing_strength_diff & has_strength_parts]
 
     lineup_signal = out[["home_lineup_strength", "away_lineup_strength"]].notna().any(axis=1)
     team_news_signal = out[[
@@ -182,12 +195,17 @@ def _normalize_match_context(raw: pd.DataFrame, league_name: str) -> pd.DataFram
         "away_key_absence_count",
         "home_manager_change_recent",
         "away_manager_change_recent",
+        "home_absence_strength_loss",
+        "away_absence_strength_loss",
     ]].notna().any(axis=1)
     weather_signal = out[["temperature_c", "wind_kph", "precipitation_mm"]].notna().any(axis=1)
+    player_context_signal = out[["home_absence_strength_loss", "away_absence_strength_loss"]].notna().any(axis=1)
 
     out["lineup_available"] = _flag_col(filtered, ("lineup_available", "confirmed_lineups_available"), lineup_signal)
     out["team_news_available"] = _flag_col(filtered, ("team_news_available", "injuries_available", "absences_available"), team_news_signal)
     out["weather_available"] = _flag_col(filtered, ("weather_available",), weather_signal)
+    out["home_player_context_available"] = _flag_col(filtered, ("home_player_context_available",), player_context_signal)
+    out["away_player_context_available"] = _flag_col(filtered, ("away_player_context_available",), player_context_signal)
 
     out = out.dropna(subset=["date", "home_team", "away_team"])
     out = out.drop_duplicates(["date", "home_team", "away_team"], keep="last")

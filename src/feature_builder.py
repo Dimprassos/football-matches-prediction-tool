@@ -47,6 +47,8 @@ FEATURE_COLUMNS = [
     "home_manager_change_recent", "away_manager_change_recent", "manager_change_recent_diff",
     "weather_available",
     "temperature_c", "wind_kph", "precipitation_mm", "weather_severity",
+    "home_absence_strength_loss", "away_absence_strength_loss", "absence_strength_loss_diff",
+    "home_player_context_available", "away_player_context_available",
 ]
 
 MLP_DEFAULT_FEATURE_COLUMNS = [
@@ -87,7 +89,11 @@ TEAM_NEWS_FEATURE_COLUMNS = [
 WEATHER_FEATURE_COLUMNS = [
     "weather_available", "temperature_c", "wind_kph", "precipitation_mm", "weather_severity",
 ]
-EXTERNAL_CONTEXT_FEATURE_COLUMNS = TEAM_NEWS_FEATURE_COLUMNS + WEATHER_FEATURE_COLUMNS
+PLAYER_CONTEXT_FEATURE_COLUMNS = [
+    "home_absence_strength_loss", "away_absence_strength_loss", "absence_strength_loss_diff",
+    "home_player_context_available", "away_player_context_available",
+]
+EXTERNAL_CONTEXT_FEATURE_COLUMNS = TEAM_NEWS_FEATURE_COLUMNS + WEATHER_FEATURE_COLUMNS + PLAYER_CONTEXT_FEATURE_COLUMNS
 BASE_NON_MARKET_FEATURE_COLUMNS = [
     col for col in FEATURE_COLUMNS
     if not col.startswith("market_logit_") and col not in MARKET_CONTEXT_FEATURE_COLUMNS
