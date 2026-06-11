@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.config import CONTEXT_AWARE_CONFIG, FINAL_CONFIG, PLAYER_CONTEXT_CONFIG
+from src.config import CONTEXT_AWARE_CONFIG, FINAL_CONFIG, FOOTYNET_CONFIG, PLAYER_CONTEXT_CONFIG
 from src.player_context import (
     build_player_strength_index,
     build_runtime_player_context,
@@ -48,6 +48,7 @@ RAW_DIR = ROOT / "data" / "raw"
 EXTERNAL_DIR = ROOT / "data" / "external"
 USER_FILE = "zz_user_added.csv"  # one per league; appended rows the loader auto-merges
 CANONICAL_EXP = FINAL_CONFIG.experiment_name
+FOOTYNET_CKPT = ROOT / "artifacts" / "footynet_deep.pt"  # trained by scripts/train_footynet.py
 
 LEAGUES = ["england", "spain", "italy", "germany", "france"]
 OUTCOME_SHORT = ["1", "X", "2"]
@@ -98,6 +99,8 @@ MODEL_LABELS = {
         "logreg": "Logistic Regression",
         "mlp": "Νευρωνικό Δίκτυο (MLP)",
         "ensemble": "Ensemble (blend)",
+        "footynet": "FootyNet (LSTM)",
+        "footynet_stack": "FootyNet + Αγορά (stack)",
     },
     "en": {
         "base": "Base — Elo + Poisson/Dixon-Coles",
@@ -107,6 +110,8 @@ MODEL_LABELS = {
         "logreg": "Logistic Regression",
         "mlp": "Neural network (MLP)",
         "ensemble": "Ensemble (blend)",
+        "footynet": "FootyNet (LSTM)",
+        "footynet_stack": "FootyNet + Market (stack)",
     },
 }
 
@@ -127,17 +132,20 @@ PREDICT_EXPERIMENTS = {
     FINAL_CONFIG.experiment_name: FINAL_CONFIG,
     CONTEXT_AWARE_CONFIG.experiment_name: CONTEXT_AWARE_CONFIG,
     PLAYER_CONTEXT_CONFIG.experiment_name: PLAYER_CONTEXT_CONFIG,
+    FOOTYNET_CONFIG.experiment_name: FOOTYNET_CONFIG,
 }
 EXPERIMENT_LABELS = {
     "el": {
         FINAL_CONFIG.experiment_name: "Αγορά (canonical)",
         CONTEXT_AWARE_CONFIG.experiment_name: "Πλούσιο σε features (understat/form)",
         PLAYER_CONTEXT_CONFIG.experiment_name: "Με εντεκάδες (lineup strength)",
+        FOOTYNET_CONFIG.experiment_name: "Βαθιά μάθηση (LSTM / FootyNet)",
     },
     "en": {
         FINAL_CONFIG.experiment_name: "Market (canonical)",
         CONTEXT_AWARE_CONFIG.experiment_name: "Feature-rich (understat/form)",
         PLAYER_CONTEXT_CONFIG.experiment_name: "Lineup-aware (lineup strength)",
+        FOOTYNET_CONFIG.experiment_name: "Deep learning (LSTM / FootyNet)",
     },
 }
 
@@ -168,14 +176,16 @@ DATASET_COLUMNS = {
 # All remaining UI strings. Values may contain {placeholders} filled via t(...).
 TEXT = {
     "el": {
-        "app_title": "⚽ Εργαλείο Πρόβλεψης Αποτελεσμάτων Ποδοσφαιρικών Αγώνων",
+        "app_title": "Εργαλείο Πρόβλεψης Αποτελεσμάτων Ποδοσφαιρικών Αγώνων",
         "page_title": "Πρόβλεψη Ποδοσφαιρικών Αγώνων",
         "language": "Γλώσσα / Language",
         "nav_header": "### Πλοήγηση",
         "nav_predict": "Πρόβλεψη Αγώνα",
         "nav_evaluation": "Αξιολόγηση Μοντέλων",
         "nav_train": "Εκπαίδευση / Δεδομένα",
-        "sidebar_info": ("Πείραμα: `{exp}`\n\nOpening odds, leakage-safe χρονικά splits. "
+        "nav_about": "Μεθοδολογία / About",
+        "sidebar_selected_exp": "**Επιλεγμένο πείραμα**\n\n{exp}",
+        "sidebar_info": ("Opening odds, leakage-safe χρονικά splits. "
                          "5 πρωταθλήματα (Αγγλία, Ισπανία, Ιταλία, Γερμανία, Γαλλία)."),
         # predict page
         "predict_header": "Πρόβλεψη Αγώνα",
@@ -234,6 +244,23 @@ TEXT = {
         "compare_models": "Σύγκριση όλων των μοντέλων",
         "col_model": "Μοντέλο",
         "col_pick": "Πρόβλεψη",
+        "prob_chart_header": "**Κατανομή πιθανοτήτων**",
+        "compare_chart_header": "**Σύγκριση μοντέλων ανά έκβαση (%)**",
+        "vs_market_caption": ("Τα βελάκια δείχνουν τη διαφορά του μοντέλου από την αγορά "
+                              "σε ποσοστιαίες μονάδες (περιγραφικά, όχι σύσταση στοιχήματος)."),
+        "glossary_header": "Τι σημαίνει κάθε μοντέλο;",
+        "glossary_body": (
+            "- **Βάση (base)** — στατιστικό μοντέλο Elo + Poisson/Dixon-Coles (δικό μας).\n"
+            "- **Αγορά (market)** — οι opening αποδόσεις μετατρεμμένες σε πιθανότητες "
+            "(εξωτερική αναφορά, όχι μοντέλο μας· σχεδόν-βέλτιστο benchmark).\n"
+            "- **Διορθωμένη Αγορά** — η αγορά διορθωμένη ελαφρώς από το μοντέλο μας.\n"
+            "- **XGBoost / Logistic Regression / MLP** — εκπαιδευμένα meta μοντέλα (δικά μας).\n"
+            "- **Ensemble** — σταθμισμένο blend των παραπάνω.\n"
+            "- **FootyNet (LSTM)** — μοντέλο βαθιάς μάθησης: 2 LSTM encoders στα τελευταία K "
+            "ματς κάθε ομάδας + static branch.\n"
+            "- **FootyNet + Αγορά (stack)** — convex blend FootyNet × αγοράς, με βάρη "
+            "μαθημένα στο validation (leakage-safe)."
+        ),
         # evaluation page
         "eval_header": "Αξιολόγηση & Επιλογή Μοντέλου",
         "eval_caption": ("Αποθηκευμένα αποτελέσματα αξιολόγησης από το backtest. "
@@ -271,16 +298,60 @@ TEXT = {
         "retrain_done": ("Η εκπαίδευση ολοκληρώθηκε. Δες τα αποτελέσματα στην καρτέλα "
                          "«Αξιολόγηση Μοντέλων» → πείραμα **user_retrain**."),
         "retrain_failed": "Η εκπαίδευση απέτυχε — δες το log παραπάνω.",
+        # about / methodology page
+        "about_header": "Μεθοδολογία & Επεξήγηση",
+        "about_pipeline_h": "Pipeline πρόβλεψης",
+        "about_pipeline": (
+            "Για κάθε αγώνα υπολογίζεται ένα **στατιστικό base** (Elo + Poisson/Dixon-Coles), "
+            "από το οποίο και από τις **αποδόσεις της αγοράς** χτίζονται features για τα meta "
+            "μοντέλα (XGBoost, Logistic Regression, MLP) και ένα **ensemble** blend. Παράλληλα "
+            "εκπαιδεύτηκε ένα μοντέλο **βαθιάς μάθησης (FootyNet)** πάνω σε ακολουθίες των "
+            "τελευταίων αγώνων κάθε ομάδας. Όλες οι πιθανότητες βαθμονομούνται (temperature "
+            "scaling) ώστε να είναι αξιόπιστες."
+        ),
+        "about_data_h": "Πηγές δεδομένων",
+        "about_data": (
+            "Ιστορικά αποτελέσματα & αποδόσεις από football-data.co.uk (5 λίγκες: Αγγλία, "
+            "Ισπανία, Ιταλία, Γερμανία, Γαλλία), συν understat xG. Ως «αγορά» χρησιμοποιούνται "
+            "οι **opening** αποδόσεις (μέσος όρος μπουκμέικερ), μετατρεμμένες σε πιθανότητες "
+            "αφαιρώντας το περιθώριο (vig)."
+        ),
+        "about_leakage_h": "Πολιτική κατά του leakage",
+        "about_leakage": (
+            "- **Χρονικά splits:** train < 2024-07, validation 2024-25, test ≥ 2025-07.\n"
+            "- **Κανόνας `date < D`:** ένας αγώνας στην ημερομηνία D χρησιμοποιεί μόνο "
+            "δεδομένα από προηγούμενους αγώνες — ποτέ μελλοντικά.\n"
+            "- Οι **opening αποδόσεις** είναι γνωστές πριν το παιχνίδι· το τελικό σκορ δεν "
+            "μπαίνει ποτέ στα features.\n"
+            "- Τα βάρη του stacking μαθαίνονται **μόνο στο validation**, αξιολογούνται στο test."
+        ),
+        "about_metrics_h": "Τι σημαίνει κάθε μετρική",
+        "about_metrics": (
+            "- **Log loss / Brier / ECE** — ποιότητα & βαθμονόμηση των *πιθανοτήτων* "
+            "(χαμηλότερο = καλύτερο).\n"
+            "- **Accuracy** — ποσοστό σωστών κορυφαίων προβλέψεων.\n"
+            "- **Macro F1** — ισορροπία ανά κλάση (1/X/2).\n"
+            "- **Draw recall** — πόσες πραγματικές ισοπαλίες πιάνει το μοντέλο."
+        ),
+        "about_benchmark_h": "Η αγορά ως benchmark",
+        "about_benchmark": (
+            "Η αγορά είναι σχεδόν-βέλτιστη: ενσωματώνει πληροφορία που δεν υπάρχει στα "
+            "ιστορικά δεδομένα. Στόχος του εργαλείου **δεν** είναι να τη νικήσει, αλλά να "
+            "δείξει πόσο κοντά φτάνουν τα μοντέλα και να επιτρέψει συγκρίσεις με διάφορες "
+            "μετρικές. Το «πλησιάζουμε αλλά δεν ξεπερνάμε την αγορά» είναι έγκυρο εύρημα."
+        ),
     },
     "en": {
-        "app_title": "⚽ Football Match Result Prediction Tool",
+        "app_title": "Football Match Result Prediction Tool",
         "page_title": "Football Match Prediction",
         "language": "Language / Γλώσσα",
         "nav_header": "### Navigation",
         "nav_predict": "Match Prediction",
         "nav_evaluation": "Model Evaluation",
         "nav_train": "Training / Data",
-        "sidebar_info": ("Experiment: `{exp}`\n\nOpening odds, leakage-safe temporal splits. "
+        "nav_about": "Methodology / About",
+        "sidebar_selected_exp": "**Selected experiment**\n\n{exp}",
+        "sidebar_info": ("Opening odds, leakage-safe temporal splits. "
                          "5 leagues (England, Spain, Italy, Germany, France)."),
         # predict page
         "predict_header": "Match Prediction",
@@ -338,6 +409,23 @@ TEXT = {
         "compare_models": "Compare all models",
         "col_model": "Model",
         "col_pick": "Pick",
+        "prob_chart_header": "**Probability distribution**",
+        "compare_chart_header": "**Model comparison per outcome (%)**",
+        "vs_market_caption": ("Arrows show the model's difference from the market in "
+                              "percentage points (descriptive, not a betting recommendation)."),
+        "glossary_header": "What does each model mean?",
+        "glossary_body": (
+            "- **Base** — statistical Elo + Poisson/Dixon-Coles model (ours).\n"
+            "- **Market** — the opening odds converted to probabilities (external reference, "
+            "not our model; a near-optimal benchmark).\n"
+            "- **Corrected market** — the market lightly corrected by our model.\n"
+            "- **XGBoost / Logistic Regression / MLP** — trained meta models (ours).\n"
+            "- **Ensemble** — weighted blend of the above.\n"
+            "- **FootyNet (LSTM)** — deep-learning model: 2 LSTM encoders over each team's "
+            "last K matches + a static branch.\n"
+            "- **FootyNet + Market (stack)** — convex blend of FootyNet x market, weights "
+            "learned on validation (leakage-safe)."
+        ),
         # evaluation page
         "eval_header": "Evaluation & Model Selection",
         "eval_caption": ("Stored evaluation results from the backtest. "
@@ -374,6 +462,46 @@ TEXT = {
         "retrain_done": ("Training finished. See the results on the "
                          "\"Model Evaluation\" page → experiment **user_retrain**."),
         "retrain_failed": "Training failed — see the log above.",
+        # about / methodology page
+        "about_header": "Methodology & Explanation",
+        "about_pipeline_h": "Prediction pipeline",
+        "about_pipeline": (
+            "For each match a **statistical base** (Elo + Poisson/Dixon-Coles) is computed; "
+            "from it and the **market odds** we build features for the meta models (XGBoost, "
+            "Logistic Regression, MLP) and an **ensemble** blend. In parallel a **deep-learning "
+            "model (FootyNet)** was trained on each team's recent-match sequences. All "
+            "probabilities are calibrated (temperature scaling) to stay reliable."
+        ),
+        "about_data_h": "Data sources",
+        "about_data": (
+            "Historical results & odds from football-data.co.uk (5 leagues: England, Spain, "
+            "Italy, Germany, France), plus understat xG. The \"market\" uses the **opening** "
+            "odds (bookmaker average), converted to probabilities by removing the margin (vig)."
+        ),
+        "about_leakage_h": "Anti-leakage policy",
+        "about_leakage": (
+            "- **Temporal splits:** train < 2024-07, validation 2024-25, test >= 2025-07.\n"
+            "- **`date < D` rule:** a match on date D uses only data from earlier matches — "
+            "never future ones.\n"
+            "- **Opening odds** are known before kickoff; the final score never enters the "
+            "features.\n"
+            "- Stacking weights are learned **only on validation**, evaluated on test."
+        ),
+        "about_metrics_h": "What each metric means",
+        "about_metrics": (
+            "- **Log loss / Brier / ECE** — quality & calibration of the *probabilities* "
+            "(lower = better).\n"
+            "- **Accuracy** — share of correct top picks.\n"
+            "- **Macro F1** — per-class balance (1/X/2).\n"
+            "- **Draw recall** — how many real draws the model catches."
+        ),
+        "about_benchmark_h": "The market as a benchmark",
+        "about_benchmark": (
+            "The market is near-optimal: it embeds information absent from historical data. "
+            "The tool's goal is **not** to beat it, but to show how close the models get and "
+            "to allow comparisons across metrics. \"We approach but do not surpass the market\" "
+            "is a valid finding."
+        ),
     },
 }
 
@@ -390,10 +518,15 @@ def _predict_config(exp_name: str):
 
 def available_predict_experiments() -> list[str]:
     """Experiments whose runtime artifacts exist on disk (so they're loadable)."""
-    return [
+    names = [
         name for name, cfg in PREDICT_EXPERIMENTS.items()
         if cfg.params_file.exists() and cfg.model_file.exists()
     ]
+    # FootyNet ships a torch checkpoint instead of the meta JSON/model pair.
+    foot = FOOTYNET_CONFIG.experiment_name
+    if foot in PREDICT_EXPERIMENTS and FOOTYNET_CKPT.exists() and foot not in names:
+        names.append(foot)
+    return names
 
 
 # --------------------------------------------------------------------------- #
@@ -408,6 +541,22 @@ def load_artifacts(exp_name: str = CANONICAL_EXP):
 def load_state(league: str, exp_name: str = CANONICAL_EXP):
     params = load_artifacts(exp_name)[0]
     return get_league_runtime_state(league, params)
+
+
+@st.cache_resource(show_spinner=True)
+def load_footynet_model():
+    """Load the trained FootyNet checkpoint once (torch model + metadata)."""
+    from src.footynet_serve import load_footynet
+
+    return load_footynet(str(FOOTYNET_CKPT))
+
+
+@st.cache_resource(show_spinner=True)
+def load_footynet_sequences(league: str, token: str):
+    """Per-team last-K match sequences for one league (rebuilt when the dataset changes)."""
+    from src.sequence_data import build_team_sequences
+
+    return build_team_sequences(load_state(league, CANONICAL_EXP).played_df)
 
 
 def _player_context_token() -> str:
@@ -449,6 +598,7 @@ def list_eval_experiments() -> list[str]:
             CANONICAL_EXP,
             CONTEXT_AWARE_CONFIG.experiment_name,
             PLAYER_CONTEXT_CONFIG.experiment_name,
+            FOOTYNET_CONFIG.experiment_name,
             "user_retrain",
         )
         if eval_file(e).exists()
@@ -542,6 +692,15 @@ def append_user_match(league: str, d: date, home: str, away: str, fthg: int, fta
 def run_prediction(league: str, home: str, away: str, oh: float, od: float, oa: float,
                    exp_name: str = CANONICAL_EXP, context: dict | None = None):
     """Load the chosen experiment's state + artifacts and predict one fixture."""
+    if exp_name == FOOTYNET_CONFIG.experiment_name:
+        from src.footynet_serve import predict_footynet_fixture
+
+        model, ckpt = load_footynet_model()
+        state = load_state(league, CANONICAL_EXP)
+        return predict_footynet_fixture(
+            home, away, oh, od, oa, state=state, model=model, ckpt=ckpt,
+            team_sequences=load_footynet_sequences(league, _dataset_token()),
+        )
     state = load_state(league, exp_name)
     (_params, meta_model, meta_cfg, mlp_model, mlp_meta,
      logreg_model, logreg_meta, blend_cfg) = load_artifacts(exp_name)
@@ -794,7 +953,10 @@ def page_predict():
             t("experiment_featureset"), predict_exps,
             format_func=lambda e: EXPERIMENT_LABELS[lang].get(e, e),
             help=t("experiment_help"),
+            key="predict_exp",
         )
+    with st.expander(t("glossary_header")):
+        st.markdown(t("glossary_body"))
     teams = league_teams(league, _dataset_token())
     st.caption(t("current_season_teams", n=len(teams)))
 
@@ -814,14 +976,33 @@ def page_predict():
     with o3:
         oa = st.number_input(t("odds_away"), min_value=0.0, value=0.0, step=0.05, format="%.2f")
 
-    model_keys = list(MODEL_LABELS[lang].keys())
+    if exp_name == FOOTYNET_CONFIG.experiment_name:
+        # FootyNet serves the stacking blend (default), the raw net, the base model and the market.
+        model_keys = ["footynet_stack", "footynet", "base", "market"]
+        default_model_idx = 0
+    else:
+        # the FootyNet-only outputs are not produced by the other experiments
+        model_keys = [k for k in MODEL_LABELS[lang].keys() if k not in ("footynet", "footynet_stack")]
+        default_model_idx = model_keys.index("ensemble")
     model_key = st.selectbox(
         t("prediction_model"),
         model_keys,
-        index=model_keys.index("ensemble"),
+        index=default_model_idx,
         format_func=lambda k: MODEL_LABELS[lang][k],
         help=t("prediction_model_help"),
     )
+
+    if exp_name == FOOTYNET_CONFIG.experiment_name:
+        st.info({
+            "el": "Μοντέλο βαθιάς μάθησης (recurrent late-fusion): δύο LSTM encoders για τα "
+                  "τελευταία K ματς κάθε ομάδας + static branch (base+market). Σύγκρινε το "
+                  "**FootyNet** με το **base** (στατιστικό μοντέλο) και την **αγορά**. "
+                  "Στην αξιολόγηση πετυχαίνει το καλύτερο logloss ανάμεσα στα καθαρά ML μοντέλα.",
+            "en": "Deep-learning model (recurrent late-fusion): two LSTM encoders over each "
+                  "team's last K matches + a static branch (base+market). Compare **FootyNet** "
+                  "against the **base** model and the **market**. In evaluation it reaches the "
+                  "best logloss among the pure-ML models.",
+        }[lang])
 
     if exp_name == PLAYER_CONTEXT_CONFIG.experiment_name:
         st.info({
@@ -839,7 +1020,10 @@ def page_predict():
         st.warning(t("same_team_warning"))
         return
 
-    player_context = player_context_controls(league, home, away)
+    player_context = (
+        None if exp_name == FOOTYNET_CONFIG.experiment_name
+        else player_context_controls(league, home, away)
+    )
 
     if not st.button(t("predict_button"), type="primary"):
         return
@@ -854,6 +1038,9 @@ def page_predict():
     if model_key in {"market", "market_corr", "ensemble"} and not used_market:
         st.info(t("no_odds_info"))
 
+    # guard against a transient experiment/model mismatch during a rerun
+    if model_key not in res:
+        model_key = next(iter(res))
     probs = np.asarray(res[model_key], dtype=float)
     pick_idx = int(probs.argmax())
     band_key, top = confidence_band(probs)
@@ -862,27 +1049,45 @@ def page_predict():
     st.subheader(f"{home} vs {away}")
     st.markdown(t("model_label", model=MODEL_LABELS[lang][model_key]))
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric(outcomes[0], f"{100 * probs[0]:.1f}%")
-    m2.metric(outcomes[1], f"{100 * probs[1]:.1f}%")
-    m3.metric(outcomes[2], f"{100 * probs[2]:.1f}%")
+    # show the model's gap to the market (descriptive) only when real odds were given
+    market_ref = (np.asarray(res["market"], dtype=float)
+                  if ("market" in res and used_market and model_key != "market") else None)
+    for col, i in zip(st.columns(3), range(3)):
+        if market_ref is not None:
+            col.metric(outcomes[i], f"{100 * probs[i]:.1f}%",
+                       delta=f"{100 * (probs[i] - market_ref[i]):+.1f} pp", delta_color="off")
+        else:
+            col.metric(outcomes[i], f"{100 * probs[i]:.1f}%")
 
     st.success(t("prediction_result", pick=outcomes[pick_idx],
                  band=CONFIDENCE_LABELS[lang][band_key], pct=100 * top))
+    if market_ref is not None:
+        st.caption(t("vs_market_caption"))
 
-    e1, e2 = st.columns(2)
-    e1.metric(t("elo_home"), f"{res['elo'][0]:.0f}")
-    e2.metric(t("elo_away"), f"{res['elo'][1]:.0f}")
-    e1.metric(t("xg_home"), f"{res['xg'][0]:.2f}")
-    e2.metric(t("xg_away"), f"{res['xg'][1]:.2f}")
+    st.markdown(t("prob_chart_header"))
+    st.bar_chart(pd.DataFrame({MODEL_LABELS[lang][model_key]: 100 * probs}, index=OUTCOME_SHORT))
 
-    st.markdown(t("most_likely_scores"))
-    st.table(pd.DataFrame(
-        [{t("score"): f"{hg}-{ag}", t("probability_pct"): round(100 * psc, 1)}
-         for (hg, ag), psc in res["scores"]]
-    ))
+    # FootyNet serves only probability arrays; the Elo/xG/score-grid diagnostics
+    # come from the statistical base pipeline and are absent for that experiment.
+    if "elo" in res:
+        e1, e2 = st.columns(2)
+        e1.metric(t("elo_home"), f"{res['elo'][0]:.0f}")
+        e2.metric(t("elo_away"), f"{res['elo'][1]:.0f}")
+        e1.metric(t("xg_home"), f"{res['xg'][0]:.2f}")
+        e2.metric(t("xg_away"), f"{res['xg'][1]:.2f}")
+
+    if "scores" in res:
+        st.markdown(t("most_likely_scores"))
+        st.table(pd.DataFrame(
+            [{t("score"): f"{hg}-{ag}", t("probability_pct"): round(100 * psc, 1)}
+             for (hg, ag), psc in res["scores"]]
+        ))
 
     with st.expander(t("compare_models")):
+        st.markdown(t("compare_chart_header"))
+        comparison = {MODEL_LABELS[lang][k]: 100 * np.asarray(res[k], dtype=float)
+                      for k in MODEL_LABELS[lang] if k in res}
+        st.bar_chart(pd.DataFrame(comparison, index=OUTCOME_SHORT))
         st.dataframe(probs_table(res), hide_index=True, width="stretch")
 
 
@@ -1008,12 +1213,26 @@ def page_train():
             st.error(t("retrain_failed"))
 
 
+def page_about():
+    """Methodology / About page: pipeline, data sources, leakage policy, metrics, benchmark."""
+    st.header(t("about_header"))
+    for head_key, body_key in (
+        ("about_pipeline_h", "about_pipeline"),
+        ("about_data_h", "about_data"),
+        ("about_leakage_h", "about_leakage"),
+        ("about_metrics_h", "about_metrics"),
+        ("about_benchmark_h", "about_benchmark"),
+    ):
+        st.subheader(t(head_key))
+        st.markdown(t(body_key))
+
+
 # --------------------------------------------------------------------------- #
 # main                                                                        #
 # --------------------------------------------------------------------------- #
 def main():
     """Streamlit entry point: language selector + sidebar navigation between the three pages."""
-    st.set_page_config(page_title=t("page_title"), page_icon="⚽", layout="wide")
+    st.set_page_config(page_title=t("page_title"), layout="wide")
     st.title(t("app_title"))
 
     with st.sidebar:
@@ -1026,7 +1245,7 @@ def main():
         )
         st.divider()
         st.markdown(t("nav_header"))
-        pages = ["predict", "evaluation", "train"]
+        pages = ["predict", "evaluation", "train", "about"]
         page = st.radio(
             t("nav_header"),
             pages,
@@ -1034,14 +1253,19 @@ def main():
             label_visibility="collapsed",
         )
         st.divider()
-        st.caption(t("sidebar_info", exp=FINAL_CONFIG.experiment_name))
+        lang = _lang()
+        selected = st.session_state.get("predict_exp", CANONICAL_EXP)
+        st.info(t("sidebar_selected_exp", exp=EXPERIMENT_LABELS[lang].get(selected, selected)))
+        st.caption(t("sidebar_info"))
 
     if page == "predict":
         page_predict()
     elif page == "evaluation":
         page_evaluation()
-    else:
+    elif page == "train":
         page_train()
+    else:
+        page_about()
 
 
 if __name__ == "__main__":

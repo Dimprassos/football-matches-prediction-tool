@@ -48,6 +48,20 @@ from src.trainer import (
     _split_played_periods,
 )
 from src.understat_data import add_understat_xg
+from src.sequence_data import (
+    SEQ_FEATURE_DIM,
+    TEAM_MATCH_FEATURES,
+    build_fixture_sequences,
+    build_team_sequences,
+    last_k_before,
+)
+
+try:  # PyTorch is a deep-learning-only optional dependency
+    import torch
+    from src.models.footynet import FootyNet, predict_proba, train_footynet
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 from src.update_api_football_context import (
     injury_fields,
     lineup_fields,
@@ -1741,6 +1755,185 @@ class PlayerStrengthIndexTests(unittest.TestCase):
         late = index.strength("star", "Man City", "england", "2023-10-01")
         self.assertEqual(late.source, "rolling_stats")
         self.assertGreater(late.player_strength, 0.0)
+
+
+class SequenceDataTests(unittest.TestCase):
+    """Leakage-safe per-team match sequences for the FootyNet deep-learning model."""
+
+    def _league(self):
+        rows = [
+            # date, home, away, home_goals, away_goals, home_xg, away_xg
+            ("2024-01-01", "A", "B", 2, 1, 1.8, 0.9),
+            ("2024-01-08", "B", "C", 0, 0, 1.1, 1.0),
+            ("2024-01-15", "A", "C", 1, 3, 1.2, 2.5),
+            ("2024-01-22", "C", "A", 2, 2, 1.5, 1.4),
+        ]
+        recs = []
+        for d, h, a, hg, ag, hxg, axg in rows:
+            recs.append({
+                "date": pd.Timestamp(d), "home_team": h, "away_team": a,
+                "home_goals": hg, "away_goals": ag,
+                "home_shots": 10, "away_shots": 8,
+                "home_shots_target": 4, "away_shots_target": 3,
+                "home_understat_xg": hxg, "away_understat_xg": axg,
+                "is_played": True,
+            })
+        return pd.DataFrame(recs)
+
+    def test_shapes_and_front_padding(self):
+        df = self._league()
+        fixtures = pd.DataFrame([{
+            "date": pd.Timestamp("2024-02-01"), "home_team": "A", "away_team": "B",
+        }])
+        out = build_fixture_sequences(df, fixtures, k=5)
+        self.assertEqual(out["seq_home"].shape, (1, 5, SEQ_FEATURE_DIM))
+        # A has 3 prior matches -> 2 zero-padded rows in front, mask [0,0,1,1,1]
+        np.testing.assert_array_equal(out["mask_home"][0], np.array([0, 0, 1, 1, 1], dtype=float))
+        np.testing.assert_array_equal(out["seq_home"][0][:2], np.zeros((2, SEQ_FEATURE_DIM)))
+
+    def test_leakage_safe_future_ignored(self):
+        df = self._league()
+        as_of = pd.Timestamp("2024-02-01")
+        base, mbase = last_k_before(build_team_sequences(df).get("A"), as_of, 5)
+        future = pd.concat([df, pd.DataFrame([{
+            "date": pd.Timestamp("2024-03-01"), "home_team": "A", "away_team": "B",
+            "home_goals": 9, "away_goals": 0, "home_shots": 20, "away_shots": 1,
+            "home_shots_target": 10, "away_shots_target": 0,
+            "home_understat_xg": 5.0, "away_understat_xg": 0.1, "is_played": True,
+        }])], ignore_index=True)
+        after, mafter = last_k_before(build_team_sequences(future).get("A"), as_of, 5)
+        np.testing.assert_array_equal(base, after)
+        np.testing.assert_array_equal(mbase, mafter)
+
+    def test_team_perspective_and_ordering(self):
+        df = self._league()
+        seq, _ = last_k_before(build_team_sequences(df).get("A"), pd.Timestamp("2024-02-01"), 3)
+        idx = {name: i for i, name in enumerate(TEAM_MATCH_FEATURES)}
+        # oldest->newest: 01-01 (A home win 2-1), 01-15 (A home loss 1-3), 01-22 (C-A 2-2, A away draw)
+        self.assertEqual(seq[0][idx["goals_for"]], 2.0)
+        self.assertEqual(seq[0][idx["result_win"]], 1.0)
+        self.assertEqual(seq[0][idx["points"]], 3.0)
+        self.assertEqual(seq[0][idx["is_home"]], 1.0)
+        self.assertEqual(seq[2][idx["is_home"]], 0.0)        # A was away in newest match
+        self.assertEqual(seq[2][idx["result_draw"]], 1.0)
+        self.assertEqual(seq[2][idx["points"]], 1.0)
+        self.assertEqual(seq[2][idx["goals_for"]], 2.0)
+        self.assertAlmostEqual(seq[1][idx["xg_for"]], 1.2)   # 01-15 A home xg
+        self.assertAlmostEqual(seq[1][idx["xg_against"]], 2.5)
+
+    def test_unknown_team_is_empty(self):
+        seq, mask = last_k_before(build_team_sequences(self._league()).get("ZZZ"),
+                                  pd.Timestamp("2024-02-01"), 5)
+        self.assertEqual(float(mask.sum()), 0.0)
+        np.testing.assert_array_equal(seq, np.zeros((5, SEQ_FEATURE_DIM)))
+
+
+class FootyNetDataTests(unittest.TestCase):
+    """Pooling of the (static + sequence) FootyNet datasets across leagues."""
+
+    def _fake(self, n, val):
+        return {
+            "seq_home": np.full((n, 5, SEQ_FEATURE_DIM), val), "seq_away": np.full((n, 5, SEQ_FEATURE_DIM), val),
+            "mask_home": np.ones((n, 5)), "mask_away": np.ones((n, 5)),
+            "static": np.full((n, 8), val), "y": np.full(n, val % 3),
+            "market": np.full((n, 3), 1 / 3), "raw_odds": np.full((n, 3), 2.0),
+        }
+
+    def test_pool_split_concatenates_and_skips_empty(self):
+        from src.footynet_data import POOL_KEYS, pool_split
+        a = {"train": self._fake(3, 1), "val": None, "test": self._fake(2, 2)}
+        b = {"train": self._fake(4, 0), "val": None, "test": self._fake(1, 0)}
+        pooled = pool_split([a, b], "train")
+        self.assertEqual(pooled["static"].shape[0], 7)
+        self.assertEqual(pooled["seq_home"].shape, (7, 5, SEQ_FEATURE_DIM))
+        self.assertEqual(set(pooled.keys()), set(POOL_KEYS))
+        self.assertIsNone(pool_split([a, b], "val"))  # all-None split -> None
+
+
+class FootyNetStackTests(unittest.TestCase):
+    """Convex stacking blend of FootyNet with the market (chunk ST-1)."""
+
+    def _members(self, n, seed):
+        rng = np.random.default_rng(seed)
+        y = rng.integers(0, 3, size=n)
+        # a perfectly-confident member (knows y) and a near-uniform noisy member
+        perfect = np.full((n, 3), 0.01)
+        perfect[np.arange(n), y] = 0.98
+        noisy = rng.dirichlet(np.ones(3) * 5.0, size=n)
+        return perfect, noisy, y
+
+    def test_weights_on_simplex_and_concentrate_on_better_member(self):
+        from src.footynet_stack import learn_blend_weights
+
+        perfect, noisy, y = self._members(200, seed=3)
+        w = learn_blend_weights({"footynet": noisy, "market": perfect}, y)
+        self.assertAlmostEqual(sum(w.values()), 1.0, places=6)
+        self.assertTrue(all(v >= 0.0 for v in w.values()))
+        # the perfect member must dominate the blend
+        self.assertGreater(w["market"], w["footynet"])
+
+    def test_stack_not_worse_than_best_member_on_fit_split(self):
+        from src.footynet_stack import _logloss, apply_blend, learn_blend_weights
+
+        perfect, noisy, y = self._members(200, seed=4)
+        members = {"footynet": noisy, "market": perfect}
+        w = learn_blend_weights(members, y)
+        stacked = apply_blend(members, w)
+        best_single = min(_logloss(noisy, y), _logloss(perfect, y))
+        # by construction the grid includes the pure-member corners, so the blend
+        # can never be worse than the better single member on the fit split
+        self.assertLessEqual(_logloss(stacked, y), best_single + 1e-9)
+
+    def test_apply_blend_rows_normalized(self):
+        from src.footynet_stack import apply_blend
+
+        perfect, noisy, _ = self._members(10, seed=5)
+        out = apply_blend({"footynet": noisy, "market": perfect}, {"footynet": 0.3, "market": 0.7})
+        np.testing.assert_allclose(out.sum(axis=1), np.ones(10), atol=1e-9)
+
+
+@unittest.skipUnless(_HAS_TORCH, "PyTorch not installed")
+class FootyNetTests(unittest.TestCase):
+    """The recurrent late-fusion deep-learning model (FootyNet)."""
+
+    def _synth(self, n, seed, K=5, D=6):
+        rng = np.random.default_rng(seed)
+        home = rng.normal(size=n); away = rng.normal(size=n)
+        sh = np.zeros((n, K, SEQ_FEATURE_DIM)); sa = np.zeros((n, K, SEQ_FEATURE_DIM))
+        sh[:, :, 0] = home[:, None]; sa[:, :, 0] = away[:, None]
+        static = np.stack([home, away, home - away,
+                           rng.normal(size=n), rng.normal(size=n), rng.normal(size=n)], axis=1)
+        score = home - away
+        y = np.where(score > 0.4, 0, np.where(score < -0.4, 2, 1)).astype(int)
+        return {"seq_home": sh, "seq_away": sa,
+                "mask_home": np.ones((n, K)), "mask_away": np.ones((n, K)),
+                "static": static, "y": y}
+
+    def test_forward_shape_and_calibrated_proba(self):
+        data = self._synth(16, seed=1)
+        res = train_footynet(data, data, max_epochs=2, patience=2, seed=0)
+        probs = predict_proba(res.model, data, res.temperature)
+        self.assertEqual(probs.shape, (16, 3))
+        np.testing.assert_allclose(probs.sum(axis=1), np.ones(16), atol=1e-5)
+        self.assertGreater(res.temperature, 0.0)
+
+    def test_no_history_sequence_is_gated_out(self):
+        model = FootyNet(static_dim=6).eval()
+        zeros = {"seq_away": torch.zeros(2, 5, SEQ_FEATURE_DIM),
+                 "mask_away": torch.ones(2, 5), "static": torch.zeros(2, 6)}
+        masked = torch.zeros(2, 5)  # fully padded -> must be ignored
+        with torch.no_grad():
+            out_a = model(torch.randn(2, 5, SEQ_FEATURE_DIM), zeros["seq_away"], masked,
+                          zeros["mask_away"], zeros["static"])
+            out_b = model(torch.randn(2, 5, SEQ_FEATURE_DIM), zeros["seq_away"], masked,
+                          zeros["mask_away"], zeros["static"])
+        self.assertTrue(torch.allclose(out_a, out_b, atol=1e-6))
+
+    def test_learns_separable_signal(self):
+        res = train_footynet(self._synth(300, seed=2), self._synth(120, seed=3),
+                             max_epochs=30, patience=8, seed=0)
+        # must beat the uniform-guess log loss of ln(3) ~= 1.0986
+        self.assertLess(res.best_val_logloss, 1.0)
 
 
 if __name__ == "__main__":

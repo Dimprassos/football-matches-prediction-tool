@@ -217,3 +217,18 @@ PLAYER_CONTEXT_CONFIG = ExperimentConfig(
     meta_feature_set="market_plus_lineup",
     mlp_feature_set="default_plus_lineup",
 )
+
+
+# Deep-learning variant: the recurrent FootyNet (src/models/footynet.py), trained by
+# its own runner (scripts/train_footynet.py) rather than run_training_pipeline. Shares
+# the canonical opening-odds / market-movement-off setup and seeds the base
+# Elo/Poisson params from FINAL_CONFIG, so its static branch matches the tabular
+# models' inputs exactly. Only the eval-report path/name is taken from here.
+FOOTYNET_CONFIG = ExperimentConfig(
+    experiment_name="footynet_deep",
+    market_odds_source="opening",
+    betting_odds_source="opening",
+    include_market_movement_features=False,
+    allow_partial_param_cache=True,
+    generate_upcoming_picks=False,
+)

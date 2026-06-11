@@ -14,3 +14,7 @@ scipy==1.17.1
 xgboost==3.2.0
 joblib==1.5.3
 requests==2.33.1
+
+# Deep-learning model (FootyNet, src/models/footynet.py). Install the CPU build:
+#   pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0
