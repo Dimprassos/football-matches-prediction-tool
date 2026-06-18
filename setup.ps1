@@ -19,22 +19,32 @@ if (-not $pythonCmd) {
 }
 Write-Host "`nUsing Python launcher: $pythonCmd"
 
-# Create the virtual environment if it does not exist yet.
-if (-not (Test-Path ".venv\Scripts\python.exe")) {
+$venvPython = ".\.venv\Scripts\python.exe"
+
+# (Re)create the virtual environment if it is missing OR broken (e.g. a previous
+# attempt left a .venv without pip). This makes re-runs self-healing.
+$needCreate = $true
+if (Test-Path $venvPython) {
+    & $venvPython -m pip --version *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $needCreate = $false
+        Write-Host "Virtual environment .venv already exists and is healthy." -ForegroundColor Green
+    } else {
+        Write-Host "Existing .venv is broken (no pip); recreating it ..." -ForegroundColor Yellow
+    }
+}
+if ($needCreate) {
+    if (Test-Path ".venv") { Remove-Item -Recurse -Force ".venv" }
     Write-Host "Creating virtual environment .venv ..." -ForegroundColor Yellow
     & $pythonCmd -m venv .venv
-    if ($LASTEXITCODE -ne 0) {
+    if (($LASTEXITCODE -ne 0) -or (-not (Test-Path $venvPython))) {
         Write-Host "ERROR: failed to create the virtual environment." -ForegroundColor Red
         exit 1
     }
-} else {
-    Write-Host "Virtual environment .venv already exists." -ForegroundColor Green
 }
 
 # Call the venv's Python directly. This avoids depending on activate.ps1, which
 # the PowerShell execution policy can block on a fresh machine.
-$venvPython = ".\.venv\Scripts\python.exe"
-
 Write-Host "`nUpgrading pip ..."
 & $venvPython -m pip install --upgrade pip
 

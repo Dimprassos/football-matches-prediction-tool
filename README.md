@@ -41,16 +41,18 @@ Requires Python 3.10 or newer.
 
 ### Windows
 
-```bat
+```powershell
 git clone <repository-url>
 cd football-matches-prediction-tool
-setup.bat
+.\setup.bat
 ```
 
-`setup.bat` creates the `.venv` and installs the dependencies. Use it rather than
-`.\setup.ps1` directly: by default Windows blocks running `.ps1` scripts
-("running scripts is disabled on this system"), and the `.bat` wrapper sidesteps that.
-After it finishes, activate the environment in your shell:
+`setup.bat` creates the `.venv` and installs the dependencies (in PowerShell type
+`.\setup.bat` with the leading `.\`). Use it rather than `.\setup.ps1` directly:
+by default Windows blocks running `.ps1` scripts ("running scripts is disabled on
+this system"), and the `.bat` wrapper sidesteps that. If a previous attempt left a
+broken `.venv`, re-running `.\setup.bat` rebuilds it automatically. After it
+finishes, activate the environment in your shell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1

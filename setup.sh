@@ -29,14 +29,22 @@ if [ -z "$PYTHON" ]; then
 fi
 echo -e "\nUsing Python interpreter: ${PYTHON}"
 
-# Create the virtual environment if it does not exist yet.
-if [ ! -x ".venv/bin/python" ]; then
+VENV_PY=".venv/bin/python"
+
+# (Re)create the virtual environment if it is missing OR broken (e.g. a previous
+# attempt left a .venv without pip). This makes re-runs self-healing.
+NEED_CREATE=1
+if [ -x "$VENV_PY" ] && "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+    NEED_CREATE=0
+    echo -e "${GREEN}Virtual environment .venv already exists and is healthy.${NC}"
+elif [ -e ".venv" ]; then
+    echo -e "${YELLOW}Existing .venv is missing pip; recreating it ...${NC}"
+fi
+if [ "$NEED_CREATE" -eq 1 ]; then
+    rm -rf .venv
     echo -e "${YELLOW}Creating virtual environment .venv ...${NC}"
     "$PYTHON" -m venv .venv
 fi
-
-# Call the venv's Python directly (no activation needed).
-VENV_PY=".venv/bin/python"
 
 echo -e "\nUpgrading pip ..."
 "$VENV_PY" -m pip install --upgrade pip
