@@ -1,13 +1,19 @@
 """Streamlit tool for predicting football match results.
 
 Thin UI layer over the trained pipeline. It loads the cached artifacts of the
-`final_opening_market_pre_match` experiment (opening odds, leakage-safe) and
-exposes two things the assignment asks for:
+configured experiments (the canonical `final_opening_market_pre_match` uses
+opening odds and is leakage-safe) and offers four pages:
 
-  * an interactive 1X2 predictor where the user picks the league, the two teams,
-    the odds and *which model* to trust (configurability + confidence level);
-  * a model-selection screen that shows the stored evaluation metrics so the
-    user can decide which model to use.
+  * **Match prediction** — an interactive 1X2 predictor where the user picks the
+    experiment, the league, the two teams, the odds and *which model* to trust
+    (configurability + confidence level). Models range from the base statistical
+    model and the market to XGBoost / MLP / LogReg, their ensemble, and — for the
+    deep-learning experiment — FootyNet (LSTM) and the FootyNet+market stack.
+  * **Model evaluation** — shows the stored evaluation metrics per model so the
+    user can decide which one to use.
+  * **Training & data** — add matches to the dataset and retrain on the new data.
+  * **About / Methodology** — explains the pipeline, data, leakage controls,
+    metrics, and the market benchmark.
 
 The interface is bilingual (Greek / English); the language is chosen in the
 sidebar and defaults to Greek. All user-facing strings live in the translation

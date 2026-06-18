@@ -1,29 +1,27 @@
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "Setting up the Football Prediction Project" -ForegroundColor Cyan
+Write-Host "Setting up the Football Prediction Tool" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-Write-Host "`nChecking for existing virtual environment..."
-if (-not (Test-Path "venv\Scripts\activate.ps1")) {
-    Write-Host "Creating virtual environment venv without pip to avoid hangs..." -ForegroundColor Yellow
-    python -m venv venv --without-pip
-    
-    Write-Host "Activating and installing pip manually..."
-    . .\venv\Scripts\activate.ps1
-    python -m ensurepip --upgrade
+Write-Host "`nChecking for existing virtual environment (.venv)..."
+if (-not (Test-Path ".venv\Scripts\activate.ps1")) {
+    Write-Host "Creating virtual environment .venv ..." -ForegroundColor Yellow
+    python -m venv .venv
 } else {
     Write-Host "Virtual environment already exists." -ForegroundColor Green
-    . .\venv\Scripts\activate.ps1
 }
+
+Write-Host "`nActivating the virtual environment..."
+. .\.venv\Scripts\activate.ps1
 
 Write-Host "`nUpgrading pip to the latest version..."
 python -m pip install --upgrade pip
 
-Write-Host "`nInstalling dependencies..."
-# Δοκιμάζει ΠΡΩΤΑ τον κεντρικό φάκελο και μετά τους υποφακέλους
- python -m pip install -r .\requirments\requirments.txt
+Write-Host "`nInstalling dependencies from requirements.txt..."
+python -m pip install -r requirements.txt
 
 Write-Host "`n==========================================" -ForegroundColor Cyan
-Write-Host "Setup Complete!" -ForegroundColor Green
-Write-Host "The virtual environment is active. To run the model, simply type:"
-Write-Host "python main.py" -ForegroundColor Yellow
+Write-Host "Setup complete. The virtual environment (.venv) is active." -ForegroundColor Green
+Write-Host "`nNext steps:"
+Write-Host "  1. Train the models once (a few minutes):  python scripts/main.py" -ForegroundColor Yellow
+Write-Host "  2. Launch the interactive tool:            streamlit run app.py" -ForegroundColor Yellow
 Write-Host "==========================================" -ForegroundColor Cyan
