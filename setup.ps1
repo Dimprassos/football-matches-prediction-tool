@@ -2,26 +2,55 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Setting up the Football Prediction Tool" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-Write-Host "`nChecking for existing virtual environment (.venv)..."
-if (-not (Test-Path ".venv\Scripts\activate.ps1")) {
-    Write-Host "Creating virtual environment .venv ..." -ForegroundColor Yellow
-    python -m venv .venv
-} else {
-    Write-Host "Virtual environment already exists." -ForegroundColor Green
+# Must run from the project root (where requirements.txt lives).
+if (-not (Test-Path "requirements.txt")) {
+    Write-Host "ERROR: requirements.txt not found. Run this script from the project root." -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "`nActivating the virtual environment..."
-. .\.venv\Scripts\activate.ps1
+# Find a Python launcher: prefer `python`, fall back to the Windows `py` launcher.
+$pythonCmd = $null
+foreach ($cand in @("python", "py")) {
+    if (Get-Command $cand -ErrorAction SilentlyContinue) { $pythonCmd = $cand; break }
+}
+if (-not $pythonCmd) {
+    Write-Host "ERROR: Python was not found on PATH. Install Python 3.10+ and re-run." -ForegroundColor Red
+    exit 1
+}
+Write-Host "`nUsing Python launcher: $pythonCmd"
 
-Write-Host "`nUpgrading pip to the latest version..."
-python -m pip install --upgrade pip
+# Create the virtual environment if it does not exist yet.
+if (-not (Test-Path ".venv\Scripts\python.exe")) {
+    Write-Host "Creating virtual environment .venv ..." -ForegroundColor Yellow
+    & $pythonCmd -m venv .venv
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: failed to create the virtual environment." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "Virtual environment .venv already exists." -ForegroundColor Green
+}
 
-Write-Host "`nInstalling dependencies from requirements.txt..."
-python -m pip install -r requirements.txt
+# Call the venv's Python directly. This avoids depending on activate.ps1, which
+# the PowerShell execution policy can block on a fresh machine.
+$venvPython = ".\.venv\Scripts\python.exe"
+
+Write-Host "`nUpgrading pip ..."
+& $venvPython -m pip install --upgrade pip
+
+Write-Host "`nInstalling dependencies from requirements.txt ..."
+& $venvPython -m pip install -r requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: dependency installation failed (see the pip output above)." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n==========================================" -ForegroundColor Cyan
-Write-Host "Setup complete. The virtual environment (.venv) is active." -ForegroundColor Green
-Write-Host "`nNext steps:"
-Write-Host "  1. Train the models once (a few minutes):  python scripts/main.py" -ForegroundColor Yellow
-Write-Host "  2. Launch the interactive tool:            streamlit run app.py" -ForegroundColor Yellow
+Write-Host "Setup complete." -ForegroundColor Green
+Write-Host "`nTo activate the environment in this shell:"
+Write-Host "  .\.venv\Scripts\Activate.ps1" -ForegroundColor Yellow
+Write-Host "(If activation is blocked, run once:  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned)"
+Write-Host "`nThen run:"
+Write-Host "  python scripts/main.py      # train the models once (a few minutes)" -ForegroundColor Yellow
+Write-Host "  streamlit run app.py        # launch the interactive tool" -ForegroundColor Yellow
 Write-Host "==========================================" -ForegroundColor Cyan

@@ -41,18 +41,30 @@ Requires Python 3.10 or newer.
 
 ### Windows
 
-```powershell
+```bat
 git clone <repository-url>
-cd Football-predictive-model-for-betting-purposes
-.\setup.ps1
+cd football-matches-prediction-tool
+setup.bat
+```
+
+`setup.bat` creates the `.venv` and installs the dependencies. Use it rather than
+`.\setup.ps1` directly: by default Windows blocks running `.ps1` scripts
+("running scripts is disabled on this system"), and the `.bat` wrapper sidesteps that.
+After it finishes, activate the environment in your shell:
+
+```powershell
 .\.venv\Scripts\Activate.ps1
 ```
+
+If activation itself is blocked, allow it once with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or just call the venv's
+interpreter directly, e.g. `.\.venv\Scripts\python.exe scripts\main.py`).
 
 ### Linux / macOS
 
 ```bash
 git clone <repository-url>
-cd Football-predictive-model-for-betting-purposes
+cd football-matches-prediction-tool
 chmod +x setup.sh
 ./setup.sh
 source .venv/bin/activate
