@@ -311,6 +311,11 @@ def fit_team_strengths_home_away_weighted(df: pd.DataFrame, decay: float = 0.001
 
     # Weighted league averages
     w_sum = df["weight"].sum()
+    if not np.isfinite(w_sum) or w_sum <= 0:
+        # No usable history (e.g. the earliest streaming block): fall back to
+        # neutral league priors and empty strength tables so lambdas default to
+        # league-average instead of NaN.
+        return 1.35, 1.10, {}, {}, {}, {}
     league_avg_home = (df["weight"] * df["home_goals"]).sum() / w_sum
     league_avg_away = (df["weight"] * df["away_goals"]).sum() / w_sum
 

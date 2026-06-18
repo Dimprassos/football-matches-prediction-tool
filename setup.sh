@@ -31,25 +31,25 @@ echo -e "\nUsing Python interpreter: ${PYTHON}"
 
 VENV_PY=".venv/bin/python"
 
-# (Re)create the virtual environment if it is missing OR broken (e.g. a previous
-# attempt left a .venv without pip). This makes re-runs self-healing.
-NEED_CREATE=1
-if [ -x "$VENV_PY" ] && "$VENV_PY" -m pip --version >/dev/null 2>&1; then
-    NEED_CREATE=0
-    echo -e "${GREEN}Virtual environment .venv already exists and is healthy.${NC}"
-elif [ -e ".venv" ]; then
-    echo -e "${YELLOW}Existing .venv is missing pip; recreating it ...${NC}"
-fi
-if [ "$NEED_CREATE" -eq 1 ]; then
-    rm -rf .venv
+# Create the virtual environment if it does not exist.
+if [ ! -x "$VENV_PY" ]; then
     echo -e "${YELLOW}Creating virtual environment .venv ...${NC}"
     "$PYTHON" -m venv .venv
+else
+    echo -e "${GREEN}Virtual environment .venv already exists.${NC}"
+fi
+
+# Make sure pip is available inside the venv. Some Python installs create venvs
+# without pip; bootstrap it with ensurepip in that case.
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+    echo -e "${YELLOW}pip not found in .venv; bootstrapping with ensurepip ...${NC}"
+    "$VENV_PY" -m ensurepip --upgrade
 fi
 
 echo -e "\nUpgrading pip ..."
 "$VENV_PY" -m pip install --upgrade pip
 
-echo -e "\nInstalling dependencies from requirements.txt ..."
+echo -e "\nInstalling dependencies from requirements.txt (torch is large, please wait) ..."
 "$VENV_PY" -m pip install -r requirements.txt
 
 echo -e "\n${CYAN}==========================================${NC}"
