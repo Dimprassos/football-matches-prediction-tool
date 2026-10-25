@@ -1199,7 +1199,17 @@ def page_evaluation():
 
     show = df[present].copy()
     show["model"] = show["model"].map(lambda m: MODEL_LABELS[lang].get(m, m))
-    show = show.rename(columns=col_labels).sort_values(logloss_col).reset_index(drop=True)
+    show = show.rename(columns=col_labels)
+    # Rank on log loss as displayed (4 decimals); a tie there is broken by higher accuracy.
+    rank = show[logloss_col].round(4).rename("_ll").to_frame()
+    sort_cols, ascending = ["_ll"], [True]
+    acc_col = col_labels["accuracy"]
+    if acc_col in show.columns:
+        rank["_acc"] = show[acc_col]
+        sort_cols.append("_acc")
+        ascending.append(False)
+    order = rank.sort_values(sort_cols, ascending=ascending, kind="stable").index
+    show = show.loc[order].reset_index(drop=True)
 
     best_model = show.iloc[0][model_col]
     best_ll = show.iloc[0][logloss_col]
