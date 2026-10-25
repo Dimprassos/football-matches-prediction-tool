@@ -18,10 +18,6 @@ never on the test set, so reported metrics are leakage-safe.
 from __future__ import annotations
 
 import numpy as np
-try:
-    import optuna
-except ImportError:  # fallback for environments without optuna
-    optuna = None
 from sklearn.metrics import log_loss
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
@@ -30,9 +26,6 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.calibration import fit_temperature, temperature_scale_probs
-
-if optuna is not None:
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 def make_mlp_pipeline(best_mlp_cfg):
@@ -253,8 +246,9 @@ def tune_market_logit_correction(
 def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
     """Tune XGBoost (learning_rate, max_depth, n_estimators) by late-validation log loss.
 
-    Fits on the early slice and scores on the late slice. Uses Optuna when available,
-    otherwise falls back to a deterministic grid search. Returns the best config dict.
+    Fits on the early slice and scores on the late slice with a deterministic grid
+    search; ``n_trials`` caps it at ``max(8, 3 * n_trials)`` points (60 of the 64 by
+    default). Returns the best config dict.
     """
     print("Tuning XGBoost Hyperparameters. Please wait...")
 
@@ -267,23 +261,7 @@ def tune_xgb_hyperparams(X_early, y_early, X_late, y_late, n_trials=20):
         meta.fit(X_early, y_early)
         return log_loss(y_late, meta.predict_proba(X_late))
 
-    if optuna is not None:
-        def objective(trial):
-            lr = trial.suggest_float("learning_rate", 0.005, 0.2, log=True)
-            md = trial.suggest_int("max_depth", 2, 6)
-            ne = trial.suggest_int("n_estimators", 50, 600)
-            return score_cfg(lr, md, ne)
-
-        study = optuna.create_study(direction="minimize")
-        study.optimize(objective, n_trials=n_trials)
-        return {
-            "learning_rate": float(study.best_params["learning_rate"]),
-            "max_depth": int(study.best_params["max_depth"]),
-            "n_estimators": int(study.best_params["n_estimators"]),
-            "late_val_logloss": float(study.best_value),
-        }
-
-    grid = [(lr, md, ne) for lr in [0.01, 0.02, 0.05, 0.1] for md in [2, 3, 4, 5] for ne in [50, 100, 200, 400]]
+    grid =[(lr, md, ne) for lr in [0.01, 0.02, 0.05, 0.1] for md in [2, 3, 4, 5] for ne in [50, 100, 200, 400]]
     best = None
     for lr, md, ne in grid[:max(8, min(len(grid), n_trials * 3))]:
         ll = score_cfg(lr, md, ne)
@@ -372,8 +350,9 @@ def tune_feature_subset(model_factory, X_early, y_early, X_late, y_late, candida
 def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
     """Tune MLP architecture/regularisation (with temperature calibration) by late log loss.
 
-    Searches 1-2 hidden layers, layer widths, ``alpha`` and initial learning rate.
-    Uses Optuna when available, else a grid fallback. Returns the best config dict.
+    Searches 1-2 hidden layers, layer widths, ``alpha`` and initial learning rate with
+    a deterministic grid; ``n_trials`` caps it at ``max(8, 3 * n_trials)`` points (45 of
+    the 60 by default). Returns the best config dict.
     """
     print("Tuning MLP Hyperparameters. Please wait...")
 
@@ -384,29 +363,6 @@ def tune_mlp_hyperparams(X_early, y_early, X_late, y_late, n_trials=15):
         T_mlp = fit_temperature(late_probs_raw, y_late)
         late_probs_cal = temperature_scale_probs(late_probs_raw, T_mlp)
         return log_loss(y_late, late_probs_cal), T_mlp
-
-    if optuna is not None:
-        def objective(trial):
-            n_layers = trial.suggest_int("n_layers", 1, 2)
-            layers = [trial.suggest_categorical(f"n_units_l{i}", [32, 64, 128]) for i in range(n_layers)]
-            alpha = trial.suggest_float("alpha", 1e-5, 1e-2, log=True)
-            lr_init = trial.suggest_float("learning_rate_init", 1e-4, 5e-3, log=True)
-            cfg = {"hidden_layer_sizes": tuple(layers), "alpha": alpha, "learning_rate_init": lr_init}
-            ll, _ = score_cfg(cfg)
-            return ll
-
-        study = optuna.create_study(direction="minimize")
-        study.optimize(objective, n_trials=n_trials)
-        best_layers = [study.best_params[f"n_units_l{i}"] for i in range(study.best_params["n_layers"])]
-        best_cfg = {
-            "hidden_layer_sizes": best_layers,
-            "alpha": float(study.best_params["alpha"]),
-            "learning_rate_init": float(study.best_params["learning_rate_init"]),
-        }
-        best_ll, best_T = score_cfg(best_cfg)
-        best_cfg["late_val_logloss"] = float(best_ll)
-        best_cfg["temperature"] = float(best_T)
-        return best_cfg
 
     grid = []
     for layers in ([32], [64], [128], [64, 32], [128, 64]):

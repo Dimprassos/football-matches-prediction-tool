@@ -12,8 +12,7 @@
 
 Artifact caching is governed by :data:`PIPELINE_VERSION` and a data/config
 fingerprint (see :func:`_cached_artifacts_are_compatible`): expensive
-hyper-parameter tuning (a deterministic grid search; Optuna is used instead when
-it happens to be installed) is reused whenever it is provably still valid, and
+hyper-parameter tuning (a deterministic grid search) is reused whenever it is provably still valid, and
 each experiment writes to its own files so runs never overwrite each other. The bulk of this module is the reporting
 helpers that produce the human-readable summaries and CSVs.
 """

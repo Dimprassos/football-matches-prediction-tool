@@ -30,8 +30,8 @@ class ExperimentConfig:
     * **Data window** — ``train_cut``/``test_cut``/``test_end`` define the fixed,
       date-based split; ``leagues`` selects which leagues are loaded.
     * **Caching / force flags** — ``use_cached_artifacts`` plus the ``force_*``
-      switches control whether the expensive hyper-parameter tuning (grid
-      search, or Optuna when installed) and model fits are reused or redone.
+      switches control whether the expensive hyper-parameter tuning (a
+      deterministic grid search) and model fits are reused or redone.
       ``allow_partial_param_cache`` lets per-league params be reused even when
       the rest of the cache is incompatible.
     * **Odds & features** — ``market_odds_source``/``betting_odds_source``
